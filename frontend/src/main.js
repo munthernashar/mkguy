@@ -34,9 +34,13 @@ const TRANSITIONS = {
 };
 
 const state = {
-  role: 'editor',
+  currentRole: null,
   filters: { book: 'all', campaign: 'all', platform: 'all', language: 'all', tag: 'all' },
   selectedId: 'p1',
+  roleManagement: {
+    users: [],
+    auditLogsByUser: {},
+  },
 
   buffer: {
     accountId: null,
@@ -272,9 +276,11 @@ const getPreApprovalChecks = (post) => {
 };
 
 const hasRolePermission = (action) => {
-  if (state.role === 'owner') return true;
+  if (state.currentRole === 'owner') return true;
   const editorPermissions = ['edit', 'submit_review', 'regenerate_hashtags', 'select_winner', 'archive'];
-  return editorPermissions.includes(action);
+  if (state.currentRole === 'editor') return editorPermissions.includes(action);
+  if (state.currentRole === 'viewer') return false;
+  return false;
 };
 
 const getFallbackSelectedId = (removedId = null) => {
@@ -328,6 +334,14 @@ const HealthView = (session) => `
   </section>
 `;
 
+const AccessDeniedView = (session) => `
+  <section class="card">
+    <h2>Kein Zugriff</h2>
+    <p>Deinem Account ist aktuell keine Rolle zugewiesen. Bitte kontaktiere einen Owner, damit dir eine Rolle vergeben wird.</p>
+    <p class="muted">Angemeldet als: <code>${session?.user?.email ?? 'unbekannt'}</code></p>
+  </section>
+`;
+
 const StudioView = () => {
   const visiblePosts = state.posts.filter(applyFilters);
   const selected = getPost();
@@ -343,17 +357,14 @@ const StudioView = () => {
   const errorList = monitor.error_list ?? [];
   const publishDeadLetters = state.monitor.deadLetters.publish ?? [];
   const generationDeadLetters = state.monitor.deadLetters.generation ?? [];
+  const roleUsers = state.roleManagement.users ?? [];
+  const roleAuditLogsByUser = state.roleManagement.auditLogsByUser ?? {};
 
   return `
     <section class="card">
       <h2>Frontend Arbeitsbereiche</h2>
       <div class="toolbar">
-        <label>Rolle
-          <select id="role-select">
-            <option value="editor" ${state.role === 'editor' ? 'selected' : ''}>editor</option>
-            <option value="owner" ${state.role === 'owner' ? 'selected' : ''}>owner</option>
-          </select>
-        </label>
+        <span class="muted">Aktive Rolle: <strong>${state.currentRole ?? 'keine'}</strong></span>
       </div>
       <div class="grid">
         ${['book', 'campaign', 'platform', 'language', 'tag'].map((key) => `
@@ -365,6 +376,29 @@ const StudioView = () => {
           </label>
         `).join('')}
       </div>
+    </section>
+
+    <section class="card">
+      <h3>Rollenverwaltung</h3>
+      <p class="muted">Nur Owner dürfen Rollen ändern. Änderungen werden über <code>set-user-role</code> ausgeführt.</p>
+      ${state.currentRole !== 'owner' ? '<p class="muted">Keine Berechtigung zur Rollenverwaltung.</p>' : ''}
+      ${state.currentRole === 'owner' ? roleUsers.map((user) => `
+        <div class="list-item">
+          <div><strong>${user.email ?? user.user_id}</strong></div>
+          <div class="muted">user_id: <code>${user.user_id}</code></div>
+          <div class="inline-actions">
+            <span>Aktuelle Rolle: <code>${user.role}</code></span>
+            <select data-user-role-select="${user.user_id}">
+              ${['owner', 'editor', 'viewer'].map((roleOption) => `<option value="${roleOption}" ${user.role === roleOption ? 'selected' : ''}>${roleOption}</option>`).join('')}
+            </select>
+            <button data-user-role-save="${user.user_id}">Rolle setzen</button>
+          </div>
+          <div>
+            <strong>Änderungsverlauf</strong>
+            ${(roleAuditLogsByUser[user.user_id] ?? []).map((entry) => `<div class="muted">${new Date(entry.created_at).toLocaleString()} • ${entry.action} • actor: ${entry.actor_user_id ?? 'system'} • details: ${JSON.stringify(entry.details ?? {})}</div>`).join('') || '<p class="muted">Keine Änderungen protokolliert.</p>'}
+          </div>
+        </div>
+      `).join('') || '<p class="muted">Keine Benutzer in user_roles gefunden.</p>' : ''}
     </section>
 
     <section class="card split">
@@ -581,6 +615,76 @@ const loadBufferState = async () => {
   state.monitor.deadLetters.generation = generationDead ?? [];
 };
 
+const loadCurrentRole = async (session) => {
+  if (!session?.user?.id) {
+    state.currentRole = null;
+    return;
+  }
+  const { data, error } = await supabase.from('user_roles').select('role').eq('user_id', session.user.id).maybeSingle();
+  if (error) {
+    throw new Error(`Rolle konnte nicht geladen werden: ${error.message}`);
+  }
+  state.currentRole = data?.role ?? null;
+};
+
+const loadRoleManagement = async () => {
+  state.roleManagement.users = [];
+  state.roleManagement.auditLogsByUser = {};
+
+  if (state.currentRole !== 'owner') return;
+
+  const { data: roles, error: roleError } = await supabase
+    .from('user_roles')
+    .select('user_id, role, updated_at, created_at')
+    .order('updated_at', { ascending: false });
+  if (roleError) throw new Error(`Benutzerrollen konnten nicht geladen werden: ${roleError.message}`);
+
+  const { data: auditLogs, error: logError } = await supabase
+    .from('audit_logs')
+    .select('id, actor_user_id, action, entity, entity_id, details, created_at')
+    .eq('entity', 'user_roles')
+    .in('action', ['role_assigned', 'role_changed', 'role_revoked'])
+    .order('created_at', { ascending: false })
+    .limit(500);
+  if (logError) throw new Error(`Änderungsverlauf konnte nicht geladen werden: ${logError.message}`);
+
+  const users = roles ?? [];
+  state.roleManagement.users = users.map((entry) => ({
+    ...entry,
+    email: null,
+  }));
+  state.roleManagement.auditLogsByUser = (auditLogs ?? []).reduce((acc, entry) => {
+    const key = entry.entity_id;
+    if (!key) return acc;
+    acc[key] = acc[key] ?? [];
+    acc[key].push(entry);
+    return acc;
+  }, {});
+};
+
+const invokeSetUserRole = async (userId, role) => {
+  const { data, error } = await supabase.functions.invoke('set-user-role', {
+    body: { user_id: userId, role },
+  });
+
+  if (error) {
+    const rawMessage = String(error.message ?? error);
+    if (rawMessage.includes('403') || rawMessage.includes('forbidden')) {
+      throw new Error('Policy-Verletzung: Nur Owner dürfen Rollen ändern.');
+    }
+    if (rawMessage.includes('401') || rawMessage.includes('unauthorized')) {
+      throw new Error('Nicht autorisiert: Bitte erneut einloggen.');
+    }
+    throw new Error(`set-user-role fehlgeschlagen: ${rawMessage}`);
+  }
+
+  if (data?.ok === false) {
+    if (data.error === 'forbidden') throw new Error('Policy-Verletzung: Nur Owner dürfen Rollen ändern.');
+    if (data.error === 'invalid_request') throw new Error('Ungültige Rollenänderung: user_id oder Rolle fehlt/ist ungültig.');
+    throw new Error(`set-user-role Fehler: ${data.error ?? 'operation_failed'}`);
+  }
+};
+
 const SessionGuard = async (viewName) => {
   const session = await getSession();
   if (!session && viewName !== 'login' && viewName !== 'auth-callback') {
@@ -670,10 +774,22 @@ const bindStudioEvents = () => {
     });
   });
 
-  document.getElementById('role-select')?.addEventListener('change', (e) => {
-    state.role = e.target.value;
-    renderLayout(StudioView());
-    bindStudioEvents();
+  document.querySelectorAll('[data-user-role-save]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const userId = button.dataset.userRoleSave;
+      const select = document.querySelector(`[data-user-role-select="${userId}"]`);
+      const nextRole = select?.value;
+      if (!userId || !nextRole) return setStatus('Ungültige Rollenänderung: user_id oder Rolle fehlt.');
+      try {
+        await invokeSetUserRole(userId, nextRole);
+        await loadRoleManagement();
+        setStatus(`Rolle für ${userId} auf "${nextRole}" aktualisiert.`);
+        renderLayout(StudioView());
+        bindStudioEvents();
+      } catch (error) {
+        setStatus(error.message);
+      }
+    });
   });
 
   document.querySelectorAll('[data-open]').forEach((el) => {
@@ -1120,11 +1236,28 @@ const renderView = async (viewName) => {
   const session = await SessionGuard(viewName);
   if (!session) return;
 
+  try {
+    await loadCurrentRole(session);
+  } catch (error) {
+    renderLayout(`<section class="card"><h2>Rollenprüfung fehlgeschlagen</h2><p>${error.message}</p></section>`);
+    return;
+  }
+
+  if (!state.currentRole) {
+    renderLayout(AccessDeniedView(session));
+    return;
+  }
+
   if (viewName === 'studio') {
     try {
       await loadPostsFromDb();
     } catch (error) {
       logger.error('load_posts_failed', { message: error.message });
+    }
+    try {
+      await loadRoleManagement();
+    } catch (error) {
+      logger.warn('load_role_management_failed', { message: error.message });
     }
     await loadBufferState();
     renderLayout(StudioView());
