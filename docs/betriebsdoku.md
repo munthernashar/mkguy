@@ -139,3 +139,20 @@ Policy-Logik:
 - Auth-nahe Endpunkte (`auth-health`, `set-user-role`, `audit-log-write`) haben ein In-Memory-Rate-Limit.
 - Fehlermeldungen sind bewusst generisch (`invalid_request`, `unauthorized`, `operation_failed`) und leaken keine internen Details.
 - Logging maskiert Schlüssel, Tokens und Secrets.
+
+
+## 10) Magic-Link Redirects (dynamische Domain)
+
+Wenn in der Mail `http://localhost:3000/...` erscheint, kommt der Link **nicht** aus dem Frontend-Code, sondern aus den Supabase Auth-URL-Einstellungen.
+
+So wird es stabil und domain-flexibel:
+
+1. **Supabase Dashboard → Authentication → URL Configuration**
+   - `Site URL` auf die aktuelle Produktions-URL setzen (nicht localhost).
+2. **Redirect allow list** pflegen (auch Wildcards möglich), z. B.:
+   - `https://mkguy.github.io/**`
+   - `https://<org>.github.io/<repo>/**`
+   - `https://*.deinedomain.tld/**` (für zukünftige Subdomains)
+3. Frontend sendet `emailRedirectTo` zur **aktuellen Runtime-URL** (`window.location.origin + pathname`) mit Callback-View.
+
+Hinweis: Supabase akzeptiert Redirects nur, wenn sie in der Allow-List liegen. Komplett beliebige Domains sind daher aus Sicherheitsgründen nicht möglich.

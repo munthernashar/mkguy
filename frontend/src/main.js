@@ -1,7 +1,6 @@
 import { PUBLIC_CONFIG } from './config.js';
 import { logger } from './logger.js';
-import { supabase } from './supabaseClient.js';
-import { getCurrentView, getParam, getSession, signInWithMagicLink, signOut, exchangeAuthCode, writeAuditLog, buildViewUrl } from './auth.js';
+import { getCurrentView, getParam, getSession, signInWithMagicLink, signOut, exchangeAuthCode, writeAuditLog, buildViewUrl, hasAuthCode } from './auth.js';
 
 const app = document.getElementById('app');
 const navButtons = document.querySelectorAll('button[data-view]');
@@ -28,7 +27,7 @@ const LoginView = () => `
     <p class="muted">Melde dich mit einem Magic-Link an.</p>
     <form id="magic-link-form">
       <label for="email">E-Mail</label><br/>
-      <input id="email" name="email" type="email" required placeholder="you@example.com" />
+      <input id="email" name="email" type="email" required placeholder="you@example.com" style="margin:0.5rem 0;padding:0.5rem;border-radius:6px;border:1px solid #475569;background:#0b1220;color:#e2e8f0;"/>
       <div>
         <button type="submit">Magic Link senden</button>
       </div>
@@ -55,116 +54,13 @@ const HealthView = (session) => `
   </section>
 `;
 
-const statusPill = (status) => `<span class="status-pill status-${status}">${status}</span>`;
-
-const BooksView = (session) => `
-  <section class="card">
-    <h2>Buchprofil & Dokumente</h2>
-    <p class="muted">Buch anlegen und pro Buch PDF hochladen.</p>
-    <form id="book-form">
-      <label for="book-title">Buchtitel</label>
-      <input id="book-title" name="title" placeholder="z. B. Deep Work" required />
-      <label for="book-description">Beschreibung</label>
-      <textarea id="book-description" name="description" rows="3" placeholder="Kurze Notizen zum Buch"></textarea>
-      <button type="submit">Buch speichern</button>
-      <p id="book-form-status" class="muted"></p>
-    </form>
-  </section>
-  <section class="card">
-    <h3>Meine Bücher (${session.user.email})</h3>
-    <div id="books-list"><p class="muted">Lade Bücher…</p></div>
-  </section>
-`;
-
 const SessionGuard = async (viewName) => {
   const session = await getSession();
-  if (!session && ['health', 'books'].includes(viewName)) {
-    navigate('login', { next: buildViewUrl(viewName) });
+  if (!session && viewName === 'health') {
+    navigate('login', { next: buildViewUrl('health') });
     return null;
   }
   return session;
-};
-
-const loadBooks = async () => {
-  const booksRoot = document.getElementById('books-list');
-  if (!booksRoot) return;
-
-  const { data: books, error } = await supabase
-    .from('books')
-    .select('id,title,description,created_at,book_documents(id,file_name,parse_status,parse_error,created_at)')
-    .order('created_at', { ascending: false });
-
-  if (error) {
-    booksRoot.innerHTML = `<p class="muted">Bücher konnten nicht geladen werden: ${error.message}</p>`;
-    return;
-  }
-
-  if (!books?.length) {
-    booksRoot.innerHTML = '<p class="muted">Noch keine Bücher vorhanden.</p>';
-    return;
-  }
-
-  booksRoot.innerHTML = books.map((book) => {
-    const docs = book.book_documents ?? [];
-    const docsHtml = docs.length
-      ? docs.map((doc) => `
-        <div class="book-item">
-          <div><strong>${doc.file_name ?? 'Dokument'}</strong> ${statusPill(doc.parse_status)}</div>
-          ${doc.parse_error ? `<p class="muted">Fehler: ${doc.parse_error}</p>` : ''}
-          <div class="inline-actions">
-            <button data-action="start-analysis" data-document-id="${doc.id}">Analyse starten</button>
-            <button data-action="restart-analysis" data-document-id="${doc.id}">Neu analysieren</button>
-          </div>
-        </div>
-      `).join('')
-      : '<p class="muted">Noch kein Dokument hochgeladen.</p>';
-
-    return `
-      <article class="book-item">
-        <h4>${book.title}</h4>
-        <p class="muted">${book.description ?? 'Keine Beschreibung.'}</p>
-        <form data-upload-form="${book.id}">
-          <input type="file" name="pdf" accept="application/pdf" required />
-          <button type="submit">PDF hochladen</button>
-          <p class="muted" data-upload-status="${book.id}"></p>
-        </form>
-        ${docsHtml}
-      </article>
-    `;
-  }).join('');
-};
-
-const uploadBookPdf = async (bookId, file) => {
-  const filePath = `${bookId}/${crypto.randomUUID()}-${file.name.replace(/\s+/g, '_')}`;
-
-  const { error: uploadError } = await supabase.storage
-    .from('book-pdfs')
-    .upload(filePath, file, { contentType: file.type || 'application/pdf', upsert: false });
-
-  if (uploadError) throw new Error(`Upload fehlgeschlagen: ${uploadError.message}`);
-
-  const { data, error } = await supabase
-    .from('book_documents')
-    .insert({
-      book_id: bookId,
-      source_type: 'upload',
-      source_uri: `book-pdfs/${filePath}`,
-      file_name: file.name,
-      mime_type: file.type || 'application/pdf',
-      parse_status: 'uploaded',
-      created_by: (await getSession())?.user.id,
-      updated_by: (await getSession())?.user.id,
-    })
-    .select('id')
-    .single();
-
-  if (error) throw new Error(`Dokument konnte nicht gespeichert werden: ${error.message}`);
-  return data.id;
-};
-
-const triggerAnalysis = async (documentId, force = false) => {
-  const { error } = await supabase.functions.invoke('start-pdf-analysis', { body: { document_id: documentId, force } });
-  if (error) throw new Error(`Analyse konnte nicht gestartet werden: ${error.message}`);
 };
 
 const bindEvents = (viewName, session) => {
@@ -187,63 +83,6 @@ const bindEvents = (viewName, session) => {
       await signOut();
       navigate('login');
     });
-  }
-
-  if (viewName === 'books' && session) {
-    const form = document.getElementById('book-form');
-    form?.addEventListener('submit', async (event) => {
-      event.preventDefault();
-      const status = document.getElementById('book-form-status');
-      const title = form.title.value.trim();
-      const description = form.description.value.trim();
-      const userId = session.user.id;
-
-      const { error } = await supabase.from('books').insert({ title, description, created_by: userId, updated_by: userId });
-      if (error) {
-        status.textContent = `Buch konnte nicht gespeichert werden: ${error.message}`;
-        return;
-      }
-      status.textContent = 'Buch gespeichert.';
-      form.reset();
-      await loadBooks();
-    });
-
-    if (!booksHandlersBound) {
-      app.addEventListener('submit', async (event) => {
-        const uploadForm = event.target.closest('form[data-upload-form]');
-        if (!uploadForm) return;
-        event.preventDefault();
-        const bookId = uploadForm.dataset.uploadForm;
-        const file = uploadForm.querySelector('input[type="file"]').files?.[0];
-        const status = document.querySelector(`[data-upload-status="${bookId}"]`);
-        if (!file) return;
-
-        try {
-          status.textContent = 'Upload läuft…';
-          const documentId = await uploadBookPdf(bookId, file);
-          status.textContent = 'Upload fertig, Dokument wurde als uploaded erfasst.';
-          await triggerAnalysis(documentId, false);
-          await loadBooks();
-        } catch (error) {
-          status.textContent = error.message;
-        }
-      });
-
-      app.addEventListener('click', async (event) => {
-        const button = event.target.closest('button[data-action]');
-        if (!button) return;
-        const docId = button.dataset.documentId;
-        const force = button.dataset.action === 'restart-analysis';
-        try {
-          await triggerAnalysis(docId, force);
-          await loadBooks();
-        } catch (error) {
-          alert(error.message);
-        }
-      });
-
-      booksHandlersBound = true;
-    }
   }
 };
 
@@ -283,19 +122,19 @@ const renderView = async (viewName) => {
   const session = await SessionGuard(viewName);
   if (!session) return;
 
-  if (viewName === 'books') {
-    renderLayout(BooksView(session));
-    bindEvents(viewName, session);
-    await loadBooks();
-    return;
-  }
-
   renderLayout(HealthView(session));
   bindEvents(viewName, session);
 };
 
 const boot = async () => {
   const view = getCurrentView();
+
+  if (hasAuthCode() && view !== 'auth-callback') {
+    const next = getParam('next') || buildViewUrl('health');
+    navigate('auth-callback', { next });
+    return;
+  }
+
   await renderView(view);
 };
 

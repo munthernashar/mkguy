@@ -3,6 +3,8 @@ import { logger } from './logger.js';
 
 export const getBaseUrl = () => `${window.location.origin}${window.location.pathname}`;
 
+export const hasAuthCode = () => Boolean(getParam('code'));
+
 export const buildViewUrl = (view, params = {}) => {
   const url = new URL(getBaseUrl());
   url.searchParams.set('view', view);
