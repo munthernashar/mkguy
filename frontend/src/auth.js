@@ -31,6 +31,18 @@ export const getParam = (name) => {
   return hashParams.get(name);
 };
 
+export const readAuthError = () => {
+  const errorCode = getParam('error_code');
+  const description = getParam('error_description');
+  if (!errorCode) return null;
+
+  if (errorCode === 'otp_expired') {
+    return 'Der Magic-Link ist abgelaufen oder bereits verwendet. Bitte fordere einen neuen Link an.';
+  }
+
+  return description ? decodeURIComponent(description.replace(/\+/g, ' ')) : 'Authentifizierung fehlgeschlagen.';
+};
+
 export const signInWithMagicLink = async (email) => {
   const next = getBaseUrl();
   const callbackUrl = buildViewUrl('auth-callback', { next });
@@ -42,7 +54,12 @@ export const signInWithMagicLink = async (email) => {
   });
 
   if (error) {
-    logger.warn('magic_link_failed', { reason: error.message });
+    logger.warn('magic_link_failed', { reason: error.message, status: error.status });
+
+    if (error.status === 429) {
+      throw new Error('Zu viele Versuche. Bitte warte 60 Sekunden und fordere dann erneut einen Magic-Link an.');
+    }
+
     throw new Error('Anmeldung fehlgeschlagen. Bitte erneut versuchen.');
   }
 };

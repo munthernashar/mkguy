@@ -1,6 +1,6 @@
 import { PUBLIC_CONFIG } from './config.js';
 import { logger } from './logger.js';
-import { getCurrentView, getParam, getSession, signInWithMagicLink, signOut, exchangeAuthCode, writeAuditLog, buildViewUrl, hasAuthCode } from './auth.js';
+import { getCurrentView, getParam, getSession, signInWithMagicLink, signOut, exchangeAuthCode, writeAuditLog, buildViewUrl, hasAuthCode, readAuthError } from './auth.js';
 
 const app = document.getElementById('app');
 const navButtons = document.querySelectorAll('button[data-view]');
@@ -29,7 +29,7 @@ const LoginView = () => `
       <label for="email">E-Mail</label><br/>
       <input id="email" name="email" type="email" required placeholder="you@example.com" style="margin:0.5rem 0;padding:0.5rem;border-radius:6px;border:1px solid #475569;background:#0b1220;color:#e2e8f0;"/>
       <div>
-        <button type="submit">Magic Link senden</button>
+        <button id="send-link" type="submit">Magic Link senden</button>
       </div>
       <p class="muted" id="login-status"></p>
     </form>
@@ -63,17 +63,44 @@ const SessionGuard = async (viewName) => {
   return session;
 };
 
+const bindLoginEvents = () => {
+  const form = document.getElementById('magic-link-form');
+  const button = document.getElementById('send-link');
+  const status = document.getElementById('login-status');
+
+  const existingError = readAuthError();
+  if (existingError && status) {
+    status.textContent = existingError;
+  }
+
+  form?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const email = form.email.value.trim();
+    if (!email) return;
+
+    button.disabled = true;
+    if (status) status.textContent = 'Sende Magic-Link…';
+
+    try {
+      await signInWithMagicLink(email);
+      if (status) {
+        status.textContent = 'Magic-Link gesendet. Prüfe dein Postfach (inkl. Spam).';
+      }
+    } catch (error) {
+      if (status) {
+        status.textContent = error.message;
+      }
+    } finally {
+      setTimeout(() => {
+        button.disabled = false;
+      }, 1500);
+    }
+  });
+};
+
 const bindEvents = (viewName, session) => {
   if (viewName === 'login') {
-    const form = document.getElementById('magic-link-form');
-    form?.addEventListener('submit', async (event) => {
-      event.preventDefault();
-      const status = document.getElementById('login-status');
-      const email = form.email.value.trim();
-      if (!email) return;
-      await signInWithMagicLink(email);
-      if (status) status.textContent = 'Magic-Link gesendet. Prüfe dein Postfach.';
-    });
+    bindLoginEvents();
   }
 
   if (viewName === 'health' && session) {
@@ -87,6 +114,19 @@ const bindEvents = (viewName, session) => {
 };
 
 const handleAuthCallback = async () => {
+  const errorMessage = readAuthError();
+  if (errorMessage) {
+    renderLayout(`
+      <section class="card">
+        <h2>Login fehlgeschlagen</h2>
+        <p>${errorMessage}</p>
+        <button id="back-login">Neuen Link anfordern</button>
+      </section>
+    `);
+    document.getElementById('back-login')?.addEventListener('click', () => navigate('login'));
+    return;
+  }
+
   try {
     await exchangeAuthCode();
     await writeAuditLog('login', { source: 'frontend' });

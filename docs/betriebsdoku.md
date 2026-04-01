@@ -156,3 +156,27 @@ So wird es stabil und domain-flexibel:
 3. Frontend sendet `emailRedirectTo` zur **aktuellen Runtime-URL** (`window.location.origin + pathname`) mit Callback-View.
 
 Hinweis: Supabase akzeptiert Redirects nur, wenn sie in der Allow-List liegen. Komplett beliebige Domains sind daher aus Sicherheitsgründen nicht möglich.
+
+
+## 11) Troubleshooting Login
+
+### Symptom: Link enthält `redirect_to=http://localhost:3000`
+Ursache: In Supabase Auth ist noch eine lokale URL als `Site URL`/Redirect hinterlegt.
+
+Fix:
+- `Authentication -> URL Configuration`
+- `Site URL` auf die reale Frontend-URL setzen, z. B. `https://munthernashar.github.io/mkguy/frontend/index.html`
+- Redirect-URL erlauben: `https://munthernashar.github.io/mkguy/frontend/**`
+
+### Symptom: `otp_expired` nach Klick auf Mail-Link
+- Der Magic-Link ist One-Time und zeitlich begrenzt.
+- Link nicht mehrfach öffnen, keine Voransicht-Scanner verwenden, direkt im gleichen Browser klicken.
+- Danach neuen Link anfordern.
+
+### Symptom: `429` beim `/auth/v1/otp`
+- Supabase limitiert E-Mail-Versandrate.
+- 60+ Sekunden warten, dann neuen Link senden.
+
+### Browser-Extension Fehler (`background.js`, `FrameDoesNotExistError`)
+Diese Meldungen stammen typischerweise von Browser-Extensions, nicht aus der App selbst.
+Für Auth-Tests am besten im Inkognito-Fenster ohne Extensions testen.
