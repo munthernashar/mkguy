@@ -32,7 +32,7 @@ const PROFILE_CONNECTION_FLOW = {
 
 const PROVIDER_ERROR_ACTIONS = [
   {
-    match: /buffer_token_missing|buffer_account_missing|buffer_profile_missing|direct_.*auth_|direct_.*token_/i,
+    match: /buffer_token_missing|buffer_token_expired|buffer_auth_invalid|buffer_account_missing|buffer_profile_missing|direct_.*auth_|direct_.*token_|auth_expired|auth_revoked/i,
     action: 'neu verbinden',
     hint: 'Verbindung ist abgelaufen oder fehlt. Bitte über „Buffer verbinden/Reconnect“ erneut autorisieren.',
   },
@@ -47,9 +47,9 @@ const PROVIDER_ERROR_ACTIONS = [
     hint: 'Direct ist nur bei funktionalen Buffer-Lücken erlaubt. Fallback-Grund setzen oder publish_via=buffer nutzen.',
   },
   {
-    match: /publish_failed|buffer_api_failed_5|timeout|rate_limit|temporar/i,
+    match: /publish_failed|buffer_api_failed_5|buffer_status_poll_failed|timeout|rate_limit|temporar/i,
     action: 'retry später',
-    hint: 'Provider aktuell nicht stabil erreichbar. Bitte später erneut versuchen.',
+    hint: 'Provider aktuell nicht stabil erreichbar. Im Ops-Dashboard Retry ausführen, sobald Verbindung wieder connected ist.',
   },
 ];
 

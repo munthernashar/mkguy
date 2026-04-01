@@ -1,5 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.49.8';
-import { exchangeBufferCode, encodeOpaqueToken } from '../_shared/buffer.ts';
+import { encryptTokenRef, exchangeBufferCode } from '../_shared/buffer.ts';
 
 Deno.serve(async (request) => {
   const url = new URL(request.url);
@@ -34,9 +34,12 @@ Deno.serve(async (request) => {
 
     await supabase.from('buffer_accounts').update({
       access_status: 'connected',
-      access_token_ref: encodeOpaqueToken(token.access_token),
-      refresh_token_ref: encodeOpaqueToken(token.refresh_token ?? ''),
+      access_token_ref: await encryptTokenRef(token.access_token),
+      refresh_token_ref: await encryptTokenRef(token.refresh_token ?? ''),
       token_expires_at: expiresAt,
+      token_scheme: 'enc_v1',
+      token_rotated_at: new Date().toISOString(),
+      auth_retry_at: null,
       connected_at: new Date().toISOString(),
       metadata: { oauth_nonce: null, oauth_connected_at: new Date().toISOString() },
     }).eq('id', account.id);
