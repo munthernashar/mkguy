@@ -114,12 +114,15 @@ const state = {
       generation: [],
     },
   },
-  kpi: {
-    range: { from: null, to: null },
-    widgets: null,
-    timeseries: [],
-    variantPerformance: [],
-    loadingError: null,
+  adminWorkspace: {
+    settings: null,
+    exportFilters: {
+      from: '',
+      to: '',
+      bookId: '',
+      campaignId: '',
+      platform: '',
+    },
   },
   mediaLibrary: {
     assets: [],
@@ -1143,6 +1146,10 @@ const StudioView = () => {
 const OpsView = () => {
   const monitor = state.monitor.summary ?? {};
   const alerts = classifyAlertBanners(monitor);
+  const adminSettings = state.adminWorkspace.settings ?? {};
+  const limits = parseObject(adminSettings.global_limits, {});
+  const toggles = parseObject(adminSettings.feature_toggles, {});
+  const exportFilters = state.adminWorkspace.exportFilters ?? {};
   const buildSection = (jobType) => {
     const jobs = state.monitor.deadLetters[jobType] ?? [];
     const filter = state.monitor.filters[jobType] ?? { errorCode: 'all', search: '' };
@@ -1205,6 +1212,68 @@ const OpsView = () => {
       ${buildSection('publish')}
       ${buildSection('generation')}
     </div>
+    <section class="card">
+      <h3>CSV Export</h3>
+      <p class="muted">Filter gelten für jeden Export-Button (falls vom Backend unterstützt).</p>
+      <div class="grid">
+        <label>Von (UTC)
+          <input id="export-filter-from" type="datetime-local" value="${escapeHtml(exportFilters.from ?? '')}" />
+        </label>
+        <label>Bis (UTC)
+          <input id="export-filter-to" type="datetime-local" value="${escapeHtml(exportFilters.to ?? '')}" />
+        </label>
+        <label>Book ID (UUID)
+          <input id="export-filter-book-id" value="${escapeHtml(exportFilters.bookId ?? '')}" placeholder="optional" />
+        </label>
+        <label>Campaign ID (UUID)
+          <input id="export-filter-campaign-id" value="${escapeHtml(exportFilters.campaignId ?? '')}" placeholder="optional" />
+        </label>
+        <label>Plattform
+          <input id="export-filter-platform" value="${escapeHtml(exportFilters.platform ?? '')}" placeholder="linkedin/x/instagram ..." />
+        </label>
+      </div>
+      <div class="inline-actions">
+        <button data-export-fn="export_posts_csv">Posts CSV</button>
+        <button data-export-fn="export_publish_jobs_csv">Publish Jobs CSV</button>
+        <button data-export-fn="export_kpi_metrics_csv">KPI Metrics CSV</button>
+        <button data-export-fn="export_campaigns_csv">Campaigns CSV</button>
+        <button data-export-fn="export_book_seed_overview_csv">Book Seed Overview CSV</button>
+      </div>
+    </section>
+    <section class="card">
+      <h3>Admin Settings (Owner only)</h3>
+      ${state.currentRole !== 'owner' ? '<p class="muted">Nur Owner dürfen Limits, Feature-Toggles und Maintenance Mode verwalten.</p>' : `
+        <div class="grid">
+          <label>max_posts_per_day
+            <input id="admin-limit-max-posts-per-day" type="number" min="1" value="${Number(limits.max_posts_per_day ?? 50)}" />
+          </label>
+          <label>max_publish_jobs_batch
+            <input id="admin-limit-max-publish-batch" type="number" min="1" value="${Number(limits.max_publish_jobs_batch ?? 100)}" />
+          </label>
+          <label>max_generation_jobs_batch
+            <input id="admin-limit-max-generation-batch" type="number" min="1" value="${Number(limits.max_generation_jobs_batch ?? 100)}" />
+          </label>
+        </div>
+        <h4>Feature-Toggles</h4>
+        <div class="inline-actions">
+          <label><input id="admin-toggle-csv-exports" type="checkbox" ${toggles.enable_csv_exports !== false ? 'checked' : ''} /> CSV Exporte</label>
+          <label><input id="admin-toggle-dead-letter-ops" type="checkbox" ${toggles.enable_dead_letter_ops !== false ? 'checked' : ''} /> Dead-Letter Ops</label>
+          <label><input id="admin-toggle-direct-publish" type="checkbox" ${toggles.enable_direct_publish !== false ? 'checked' : ''} /> Direct Publish</label>
+          <label><input id="admin-toggle-seed-overview-export" type="checkbox" ${toggles.enable_seed_overview_export !== false ? 'checked' : ''} /> Seed Overview Export</label>
+        </div>
+        <h4>Maintenance Mode</h4>
+        <div class="grid">
+          <label><input id="admin-maintenance-mode" type="checkbox" ${adminSettings.maintenance_mode ? 'checked' : ''} /> Wartungsmodus aktiv</label>
+          <label>Maintenance Message
+            <input id="admin-maintenance-message" value="${escapeHtml(adminSettings.maintenance_message ?? '')}" placeholder="Hinweistext für Nutzer" />
+          </label>
+        </div>
+        <div class="inline-actions">
+          <button id="admin-save-limits-toggles">Limits & Toggles speichern</button>
+          <button id="admin-save-maintenance">Maintenance Mode speichern</button>
+        </div>
+      `}
+    </section>
     <p id="ops-status" class="muted"></p>
   `;
 };
@@ -1564,6 +1633,16 @@ const loadRoleManagement = async () => {
     acc[key].push(entry);
     return acc;
   }, {});
+};
+
+const loadAdminWorkspace = async () => {
+  const { data, error } = await supabase
+    .from('admin_settings')
+    .select('id, global_limits, feature_toggles, maintenance_mode, maintenance_message, updated_at, updated_by')
+    .eq('id', 1)
+    .maybeSingle();
+  if (error) throw new Error(`Admin Settings konnten nicht geladen werden: ${error.message}`);
+  state.adminWorkspace.settings = data ?? null;
 };
 
 const invokeSetUserRole = async (userId, role) => {
@@ -2686,9 +2765,39 @@ const bindOpsEvents = () => {
   };
   const refreshOps = async (message = null) => {
     await loadBufferState();
+    await loadAdminWorkspace();
     renderLayout(OpsView());
     bindOpsEvents();
     if (message) setStatus(message);
+  };
+  const syncExportFiltersFromUi = () => {
+    state.adminWorkspace.exportFilters = {
+      from: document.getElementById('export-filter-from')?.value ?? '',
+      to: document.getElementById('export-filter-to')?.value ?? '',
+      bookId: document.getElementById('export-filter-book-id')?.value?.trim() ?? '',
+      campaignId: document.getElementById('export-filter-campaign-id')?.value?.trim() ?? '',
+      platform: document.getElementById('export-filter-platform')?.value?.trim() ?? '',
+    };
+  };
+  const toIsoOrNull = (value) => {
+    if (!value) return null;
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  };
+  const toDateOrNull = (value) => {
+    if (!value) return null;
+    return value.slice(0, 10);
+  };
+  const triggerCsvDownload = (content, fileName) => {
+    const blob = new Blob([content], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
   };
   document.getElementById('refresh-monitor')?.addEventListener('click', async () => refreshOps('Monitoring-Dashboard aktualisiert.'));
   document.getElementById('recover-stuck-jobs')?.addEventListener('click', async () => {
@@ -2760,6 +2869,64 @@ const bindOpsEvents = () => {
       state.monitor.selectedJobs[jobType] = [];
       await refreshOps(`${ok}/${selected.length} Jobs (${jobType}) erfolgreich: ${mode}.`);
     });
+  });
+  ['export-filter-from', 'export-filter-to', 'export-filter-book-id', 'export-filter-campaign-id', 'export-filter-platform'].forEach((id) => {
+    document.getElementById(id)?.addEventListener('change', syncExportFiltersFromUi);
+  });
+  document.querySelectorAll('[data-export-fn]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      syncExportFiltersFromUi();
+      const exportFn = button.dataset.exportFn;
+      const filters = state.adminWorkspace.exportFilters;
+      const payload = {
+        p_from: exportFn === 'export_kpi_metrics_csv' ? toDateOrNull(filters.from) : toIsoOrNull(filters.from),
+        p_to: exportFn === 'export_kpi_metrics_csv' ? toDateOrNull(filters.to) : toIsoOrNull(filters.to),
+        p_book_id: isUuid(filters.bookId) ? filters.bookId : null,
+        p_campaign_id: isUuid(filters.campaignId) ? filters.campaignId : null,
+        p_platform: filters.platform || null,
+      };
+      const { data, error } = await supabase.rpc(exportFn, payload);
+      if (error) return setStatus(`${exportFn} fehlgeschlagen: ${error.message}`);
+      triggerCsvDownload(data ?? '', `${exportFn}_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`);
+      setStatus(`${exportFn} erfolgreich exportiert.`);
+    });
+  });
+  document.getElementById('admin-save-limits-toggles')?.addEventListener('click', async () => {
+    if (state.currentRole !== 'owner') return setStatus('Nur Owner dürfen Admin Settings ändern.');
+    try {
+      const current = state.adminWorkspace.settings ?? {};
+      const payload = {
+        global_limits: {
+          ...(parseObject(current.global_limits, {})),
+          max_posts_per_day: Number(document.getElementById('admin-limit-max-posts-per-day')?.value ?? 50),
+          max_publish_jobs_batch: Number(document.getElementById('admin-limit-max-publish-batch')?.value ?? 100),
+          max_generation_jobs_batch: Number(document.getElementById('admin-limit-max-generation-batch')?.value ?? 100),
+        },
+        feature_toggles: {
+          ...(parseObject(current.feature_toggles, {})),
+          enable_csv_exports: Boolean(document.getElementById('admin-toggle-csv-exports')?.checked),
+          enable_dead_letter_ops: Boolean(document.getElementById('admin-toggle-dead-letter-ops')?.checked),
+          enable_direct_publish: Boolean(document.getElementById('admin-toggle-direct-publish')?.checked),
+          enable_seed_overview_export: Boolean(document.getElementById('admin-toggle-seed-overview-export')?.checked),
+        },
+      };
+      const { error } = await supabase.from('admin_settings').update(payload).eq('id', 1);
+      if (error) throw error;
+      await refreshOps('Admin-Limits und Feature-Toggles gespeichert.');
+    } catch (error) {
+      setStatus(`Admin Settings speichern fehlgeschlagen: ${error.message}`);
+    }
+  });
+  document.getElementById('admin-save-maintenance')?.addEventListener('click', async () => {
+    if (state.currentRole !== 'owner') return setStatus('Nur Owner dürfen den Wartungsmodus ändern.');
+    const enabled = Boolean(document.getElementById('admin-maintenance-mode')?.checked);
+    const message = document.getElementById('admin-maintenance-message')?.value?.trim() || null;
+    const { error } = await supabase.rpc('set_maintenance_mode', {
+      p_enabled: enabled,
+      p_message: message,
+    });
+    if (error) return setStatus(`set_maintenance_mode fehlgeschlagen: ${error.message}`);
+    await refreshOps(`Maintenance Mode ${enabled ? 'aktiviert' : 'deaktiviert'}.`);
   });
 };
 
@@ -2878,6 +3045,11 @@ const renderView = async (viewName) => {
 
   if (viewName === 'ops') {
     await loadBufferState();
+    try {
+      await loadAdminWorkspace();
+    } catch (error) {
+      logger.warn('load_admin_workspace_failed', { message: error.message });
+    }
     renderLayout(OpsView());
     bindEvents(viewName, session);
     return;
