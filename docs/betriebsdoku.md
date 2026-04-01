@@ -186,3 +186,41 @@ Für Auth-Tests am besten im Inkognito-Fenster ohne Extensions testen.
 - Im Frontend gibt es nun zusätzlich E-Mail/Passwort-Login als Fallback.
 - Ursache ist oft ein bereits konsumierter PKCE-Link (z. B. durch Vorschau-Scanner) oder mehrfaches Öffnen des gleichen Links.
 - Workaround: neuen Link anfordern oder Passwort-Login verwenden.
+
+## 12) Publishing Provider: Buffer vs. Direct
+
+### Triggerbedingungen für Wechsel auf `publish_via=direct`
+
+Der Wechsel von Buffer auf Direct-Publishing ist nur bei **funktionalen Lücken** erlaubt (nicht bei temporären Fehlern wie 5xx/Timeout):
+
+- `missing_buffer_feature_media`: benötigter Medientyp/-flow ist via Buffer funktional nicht verfügbar.
+- `missing_buffer_feature_platform`: Plattform/Endpoint wird in Buffer nicht unterstützt.
+- `missing_buffer_feature_scheduling_mode`: gewünschter Scheduling-Modus ist in Buffer funktional nicht abbildbar.
+
+Temporäre Buffer-Fehler werden weiterhin über Retry/Queue in `publish_jobs` behandelt und **dürfen keinen automatischen Providerwechsel** auslösen.
+
+### Tokenverwaltung und sichere Speicherung
+
+- Direct-Publishing nutzt `platform_accounts` als primäre Tokenquelle (`access_token_ref`, `refresh_token_ref`, `token_expires_at`, `secure_metadata`).
+- Tokens werden nur als Referenz-/opaque Werte gespeichert, nicht im Frontend.
+
+### Fehlercodes und Diagnosepfade (Direct)
+
+- `direct_platform_account_missing` → `direct/platform_account_lookup`
+- `direct_auth_not_connected` → `direct/auth_status`
+- `direct_token_missing` → `direct/token_storage`
+- `direct_scheduling_not_supported` → `direct/capabilities/scheduling`
+- `direct_media_not_supported` → `direct/capabilities/media`
+- `direct_platform_not_supported` → `direct/capabilities/platform`
+
+Diese Informationen werden in `publish_jobs.last_error_code`, `publish_jobs.last_error` sowie `debug_payload`/`diagnostic_path` persistiert.
+
+### Minimaler Fallback-Umfang pro Plattform (Direct)
+
+| Plattform | Text-only | Media | Scheduling | Hinweis |
+|---|---|---|---|---|
+| linkedin | ✅ | ❌ | ❌ | Direct nur sofortige Textposts |
+| x | ✅ | ❌ | ❌ | Direct nur sofortige Textposts |
+| instagram | ❌ | ❌ | ❌ | Nicht unterstützt |
+
+Nicht unterstützte Kombinationen werden im UI explizit markiert (z. B. `direct + media` oder `direct + scheduling`).

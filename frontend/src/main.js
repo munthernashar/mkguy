@@ -12,6 +12,12 @@ const PLATFORM_LIMITS = {
   x: { text: 280, hashtags: 3, requiresImage: false },
 };
 
+const DIRECT_CAPABILITY_MATRIX = {
+  linkedin: { textOnly: true, media: false, scheduling: false },
+  instagram: { textOnly: false, media: false, scheduling: false },
+  x: { textOnly: true, media: false, scheduling: false },
+};
+
 const CTA_HINTS = ['Starte jetzt', 'Kostenlos testen', 'Mehr erfahren', 'Termin buchen'];
 const HOOK_HINTS = ['Provokante Frage', 'Statistik als Einstieg', 'Vorher/Nachher', 'Story in 1 Satz'];
 const WORKFLOW_STATUSES = ['draft', 'review', 'approved', 'scheduled', 'publishing', 'posted', 'failed', 'archived'];
@@ -38,6 +44,8 @@ const state = {
     profiles: [],
     profileMap: {},
     debug: null,
+    publishVia: 'buffer',
+    platformAccounts: [],
   },
 
   posts: [
@@ -354,10 +362,23 @@ const StudioView = () => {
           ${state.buffer.profiles.filter((p) => p.service === selected.platform).map((p) => `<option value="${p.id}" ${state.buffer.profileMap[selected.platform] === p.id ? 'selected' : ''}>${p.profile_name} (${p.service})</option>`).join('')}
         </select>
       </label>
+      <label>publish_via
+        <select id="publish-via">
+          <option value="buffer" ${state.buffer.publishVia === 'buffer' ? 'selected' : ''}>buffer</option>
+          <option value="direct" ${state.buffer.publishVia === 'direct' ? 'selected' : ''}>direct</option>
+        </select>
+      </label>
+      <p class="muted">Direkt-Account (${selected.platform}): ${state.buffer.platformAccounts.find((account) => account.platform === selected.platform)?.account_name ?? 'nicht verbunden'}</p>
       <div class="inline-actions">
         <button id="buffer-publish-now">publish-via-buffer jetzt</button>
         <button id="buffer-publish-scheduled">publish-via-buffer geplant (+15m)</button>
       </div>
+      <h4>Direct-Fallback Minimum je Plattform</h4>
+      <ul>
+        ${Object.entries(DIRECT_CAPABILITY_MATRIX).map(([platform, caps]) => `<li><strong>${platform}</strong>: text-only=${caps.textOnly ? '✅' : '❌'}, media=${caps.media ? '✅' : '❌'}, scheduling=${caps.scheduling ? '✅' : '❌'}</li>`).join('')}
+      </ul>
+      ${state.buffer.publishVia === 'direct' && selected.hasImage ? '<p class="danger">Nicht unterstützt: Media-Post via direct für diese Plattform.</p>' : ''}
+      ${state.buffer.publishVia === 'direct' ? '<p class="muted">Direct wird nur bei funktionalen Lücken verwendet (z. B. Media/Scheduling-Support fehlt in Buffer), nicht bei temporären Buffer-Fehlern.</p>' : ''}
 
       <h4>Debugpanel</h4>
       <ul>
@@ -383,6 +404,9 @@ const loadBufferState = async () => {
   } else {
     state.buffer.profiles = [];
   }
+
+  const { data: platformAccounts } = await supabase.from('platform_accounts').select('id, platform, account_name, auth_status, is_active').eq('is_active', true);
+  state.buffer.platformAccounts = platformAccounts ?? [];
 
   const { data: latestJob } = await supabase.from('publish_jobs').select('provider, buffer_update_id, attempts, last_error').order('created_at', { ascending: false }).limit(1);
   state.buffer.debug = latestJob?.[0] ?? null;
@@ -597,15 +621,30 @@ const bindStudioEvents = () => {
     setStatus(`Profil-Mapping für ${post.platform} gespeichert.`);
   });
 
-  const publishViaBuffer = async (scheduledAt = null) => {
+  document.getElementById('publish-via')?.addEventListener('change', (event) => {
+    state.buffer.publishVia = event.target.value;
+    renderLayout(StudioView());
+    bindStudioEvents();
+  });
+
+  const publishViaProvider = async (scheduledAt = null) => {
+    const publishVia = state.buffer.publishVia;
     const mappedProfileId = state.buffer.profileMap[post.platform];
-    if (!mappedProfileId) return setStatus(`Kein Buffer-Profil für ${post.platform} gemappt.`);
+    const mappedPlatformAccount = state.buffer.platformAccounts.find((account) => account.platform === post.platform);
+    if (publishVia === 'buffer' && !mappedProfileId) return setStatus(`Kein Buffer-Profil für ${post.platform} gemappt.`);
+    if (publishVia === 'direct' && !mappedPlatformAccount) return setStatus(`Kein Direct-Account für ${post.platform} verbunden.`);
     const selectedVariant = post.variants.find((v) => v.is_selected) ?? post.variants[0];
     const media = post.hasImage ? [{ url: 'https://picsum.photos/1080/1080.jpg', mime_type: 'image/jpeg', width: 1080, height: 1080 }] : [];
+    const directCaps = DIRECT_CAPABILITY_MATRIX[post.platform] ?? { textOnly: false, media: false, scheduling: false };
+    if (publishVia === 'direct' && media.length > 0 && !directCaps.media) return setStatus(`Nicht unterstützt: direct + Media für ${post.platform}.`);
+    if (publishVia === 'direct' && scheduledAt && !directCaps.scheduling) return setStatus(`Nicht unterstützt: direct + Scheduling für ${post.platform}.`);
     const { data, error } = await supabase.functions.invoke('publish-via-buffer', {
       body: {
         post_id: post.id,
         buffer_profile_id: mappedProfileId,
+        platform_account_id: mappedPlatformAccount?.id ?? null,
+        publish_via: publishVia,
+        platform: post.platform,
         text: selectedVariant?.text ?? post.title,
         media,
         scheduled_at: scheduledAt,
@@ -613,18 +652,18 @@ const bindStudioEvents = () => {
     });
     if (error) return setStatus(`publish-via-buffer Fehler: ${error.message}`);
     state.buffer.debug = {
-      provider: 'buffer',
-      buffer_update_id: data?.buffer_update_id,
+      provider: publishVia,
+      buffer_update_id: data?.buffer_update_id ?? null,
       attempts: 1,
       last_error: null,
     };
-    setStatus(`publish-via-buffer gestartet (${scheduledAt ? 'geplant' : 'sofort'}).`);
+    setStatus(`publish-via-buffer gestartet via ${publishVia} (${scheduledAt ? 'geplant' : 'sofort'}).`);
     renderLayout(StudioView());
     bindStudioEvents();
   };
 
-  document.getElementById('buffer-publish-now')?.addEventListener('click', async () => publishViaBuffer(null));
-  document.getElementById('buffer-publish-scheduled')?.addEventListener('click', async () => publishViaBuffer(new Date(Date.now() + 15 * 60_000).toISOString()));
+  document.getElementById('buffer-publish-now')?.addEventListener('click', async () => publishViaProvider(null));
+  document.getElementById('buffer-publish-scheduled')?.addEventListener('click', async () => publishViaProvider(new Date(Date.now() + 15 * 60_000).toISOString()));
 
   document.getElementById('sort-hashtags')?.addEventListener('click', () => {
     const input = document.getElementById('hashtags-input').value;
