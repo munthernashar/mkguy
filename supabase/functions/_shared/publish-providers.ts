@@ -1,5 +1,5 @@
 import type { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.49.8';
-import { bufferApi, decodeOpaqueToken } from './buffer.ts';
+import { bufferApi, decryptTokenRef, encryptTokenRef, refreshBufferToken } from './buffer.ts';
 
 export type MediaInput = { url: string; mime_type?: string; width?: number; height?: number };
 export type PublishVia = 'buffer' | 'direct';
@@ -181,8 +181,8 @@ const refreshDirectTokenIfNeeded = async (
   supabase: SupabaseClient,
   account: PlatformAccountRow,
 ): Promise<{ accessToken: string; refreshToken: string }> => {
-  const currentAccessToken = decodeOpaqueToken(account.access_token_ref ?? null);
-  const currentRefreshToken = decodeOpaqueToken(account.refresh_token_ref ?? null);
+  const currentAccessToken = await decryptTokenRef(account.access_token_ref ?? null);
+  const currentRefreshToken = await decryptTokenRef(account.refresh_token_ref ?? null);
 
   if (!currentRefreshToken) {
     throw new PublishProviderError(platformCode(account.platform, 'refresh_token_missing'), 'Refresh token missing.', 'direct/token_refresh/missing', 422, false, 'auth');
@@ -228,6 +228,17 @@ const refreshDirectTokenIfNeeded = async (
 
   const tokenPayload = await safeJson(tokenResponse);
   if (!tokenResponse.ok) {
+    const nextState = tokenResponse.status === 401 ? 'expired' : tokenResponse.status === 403 ? 'revoked' : 'error';
+    await supabase.from('platform_accounts').update({
+      auth_status: nextState,
+      auth_retry_at: tokenResponse.status >= 500 ? new Date(Date.now() + 5 * 60_000).toISOString() : null,
+      secure_metadata: {
+        ...(account.secure_metadata ?? {}),
+        last_refresh_error_at: new Date().toISOString(),
+        last_refresh_error_status: tokenResponse.status,
+        next_retry_at: tokenResponse.status >= 500 ? new Date(Date.now() + 5 * 60_000).toISOString() : null,
+      },
+    }).eq('id', account.id);
     throw mapProviderError(account.platform, tokenResponse.status, tokenPayload, 'direct/token_refresh');
   }
 
@@ -242,13 +253,18 @@ const refreshDirectTokenIfNeeded = async (
     ? new Date(Date.now() + tokenData.expires_in * 1000).toISOString()
     : null;
   await supabase.from('platform_accounts').update({
-    access_token_ref: btoa(nextAccessToken),
-    refresh_token_ref: btoa(nextRefreshToken),
+    access_token_ref: await encryptTokenRef(nextAccessToken),
+    refresh_token_ref: await encryptTokenRef(nextRefreshToken),
     token_expires_at: expiresAt,
+    token_scheme: 'enc_v1',
+    token_rotated_at: new Date().toISOString(),
     auth_status: 'connected',
+    auth_retry_at: null,
     secure_metadata: {
       ...(account.secure_metadata ?? {}),
       last_refresh_at: new Date().toISOString(),
+      last_refresh_error_at: null,
+      next_retry_at: null,
     },
   }).eq('id', account.id);
 
@@ -314,10 +330,35 @@ const publishViaBuffer = async (supabase: SupabaseClient, ctx: PublishContext): 
   const { data: profile } = await supabase.from('buffer_profiles').select('id, external_profile_id, buffer_account_id').eq('id', ctx.profileId).single();
   if (!profile) throw new PublishProviderError('buffer_profile_missing', 'Missing profile.', 'buffer/profile_lookup', 404, false, 'payload');
 
-  const { data: account } = await supabase.from('buffer_accounts').select('id, owner_user_id, access_token_ref').eq('id', profile.buffer_account_id).single();
+  const { data: account } = await supabase.from('buffer_accounts').select('id, owner_user_id, access_token_ref, refresh_token_ref, token_expires_at, access_status').eq('id', profile.buffer_account_id).single();
   ensureOwnership(account, ctx.userId, 'buffer_account_missing');
-
-  const accessToken = decodeOpaqueToken(account.access_token_ref);
+  let accessToken = await decryptTokenRef(account.access_token_ref);
+  const refreshToken = await decryptTokenRef(account.refresh_token_ref ?? null);
+  if (!accessToken && !refreshToken) throw new PublishProviderError('buffer_token_missing', 'Buffer token missing.', 'buffer/token_decode', 422, false, 'auth');
+  const isExpired = account.token_expires_at && Date.parse(account.token_expires_at) <= Date.now();
+  if ((!accessToken || isExpired) && refreshToken) {
+    try {
+      const token = await refreshBufferToken(refreshToken);
+      accessToken = token.access_token;
+      await supabase.from('buffer_accounts').update({
+        access_status: 'connected',
+        access_token_ref: await encryptTokenRef(token.access_token),
+        refresh_token_ref: await encryptTokenRef(token.refresh_token ?? refreshToken),
+        token_expires_at: token.expires_in ? new Date(Date.now() + token.expires_in * 1000).toISOString() : null,
+        token_scheme: 'enc_v1',
+        token_rotated_at: new Date().toISOString(),
+        auth_retry_at: null,
+        metadata: { refreshed_at: new Date().toISOString(), refreshed_from: 'publish' },
+      }).eq('id', account.id);
+    } catch (error) {
+      await supabase.from('buffer_accounts').update({
+        access_status: 'expired',
+        auth_retry_at: new Date(Date.now() + 5 * 60_000).toISOString(),
+        last_sync_error: String(error),
+      }).eq('id', account.id);
+      throw new PublishProviderError('buffer_token_expired', 'Buffer token expired.', 'buffer/token_refresh', 401, false, 'auth');
+    }
+  }
   if (!accessToken) throw new PublishProviderError('buffer_token_missing', 'Buffer token missing.', 'buffer/token_decode', 422, false, 'auth');
 
   const requestBody: Record<string, unknown> = {
@@ -327,10 +368,23 @@ const publishViaBuffer = async (supabase: SupabaseClient, ctx: PublishContext): 
   };
   if (ctx.scheduledAt) requestBody.scheduled_at = ctx.scheduledAt;
 
-  const response = await bufferApi('/updates/create.json', accessToken, {
-    method: 'POST',
-    body: JSON.stringify(requestBody),
-  });
+  let response: Response;
+  try {
+    response = await bufferApi('/updates/create.json', accessToken, {
+      method: 'POST',
+      body: JSON.stringify(requestBody),
+    });
+  } catch (error) {
+    const status = Number(String(error).split('_').pop() ?? 0);
+    if (status === 401 || status === 403) {
+      await supabase.from('buffer_accounts').update({
+        access_status: status === 401 ? 'expired' : 'revoked',
+        last_sync_error: String(error),
+      }).eq('id', account.id);
+      throw new PublishProviderError('buffer_auth_invalid', 'Buffer authentication invalid.', 'buffer/auth_status', 401, false, 'auth', status);
+    }
+    throw error;
+  }
 
   const update = await response.json();
   return {

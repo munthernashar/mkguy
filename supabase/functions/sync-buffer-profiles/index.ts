@@ -1,6 +1,6 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.49.8';
 import { buildCorsHeaders } from '../_shared/cors.ts';
-import { bufferApi, decodeOpaqueToken, serviceFromNetwork } from '../_shared/buffer.ts';
+import { bufferApi, decryptTokenRef, encryptTokenRef, refreshBufferToken, serviceFromNetwork } from '../_shared/buffer.ts';
 
 Deno.serve(async (request) => {
   const corsHeaders = buildCorsHeaders(request.headers.get('origin'));
@@ -14,16 +14,44 @@ Deno.serve(async (request) => {
   if (!userId) return new Response(JSON.stringify({ ok: false, error: 'unauthorized' }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 
   const { buffer_account_id: accountId } = await request.json().catch(() => ({}));
-  const query = supabase.from('buffer_accounts').select('id, access_token_ref').eq('owner_user_id', userId).eq('status', 'active');
+  const query = supabase.from('buffer_accounts').select('id, access_token_ref, refresh_token_ref, token_expires_at').eq('owner_user_id', userId).eq('status', 'active');
   const { data: accounts } = accountId ? await query.eq('id', accountId) : await query;
   if (!accounts?.length) return new Response(JSON.stringify({ ok: false, error: 'missing_account' }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 
   const synced: Array<Record<string, unknown>> = [];
   for (const account of accounts) {
-    const accessToken = decodeOpaqueToken(account.access_token_ref);
+    let accessToken = await decryptTokenRef(account.access_token_ref);
+    const refreshToken = await decryptTokenRef(account.refresh_token_ref);
+    if (!accessToken && refreshToken) {
+      const refreshed = await refreshBufferToken(refreshToken);
+      accessToken = refreshed.access_token;
+      await supabase.from('buffer_accounts').update({
+        access_status: 'connected',
+        access_token_ref: await encryptTokenRef(refreshed.access_token),
+        refresh_token_ref: await encryptTokenRef(refreshed.refresh_token ?? refreshToken),
+        token_expires_at: refreshed.expires_in ? new Date(Date.now() + refreshed.expires_in * 1000).toISOString() : null,
+        token_scheme: 'enc_v1',
+        token_rotated_at: new Date().toISOString(),
+        auth_retry_at: null,
+      }).eq('id', account.id);
+    }
     if (!accessToken) continue;
-    const response = await bufferApi('/profiles.json', accessToken);
-    const profiles = await response.json();
+
+    let profiles: Array<Record<string, unknown>> = [];
+    try {
+      const response = await bufferApi('/profiles.json', accessToken);
+      profiles = await response.json();
+    } catch (error) {
+      const message = String(error);
+      const status = Number(message.split('_').pop() ?? 0);
+      const authState = status === 401 ? 'expired' : status === 403 ? 'revoked' : 'error';
+      await supabase.from('buffer_accounts').update({
+        access_status: authState,
+        auth_retry_at: authState === 'expired' ? new Date(Date.now() + 5 * 60_000).toISOString() : null,
+        last_sync_error: message,
+      }).eq('id', account.id);
+      continue;
+    }
 
     for (const profile of profiles) {
       const payload = {
@@ -40,7 +68,7 @@ Deno.serve(async (request) => {
       synced.push(payload);
     }
 
-    await supabase.from('buffer_accounts').update({ last_synced_at: new Date().toISOString(), last_sync_error: null }).eq('id', account.id);
+    await supabase.from('buffer_accounts').update({ access_status: 'connected', last_synced_at: new Date().toISOString(), auth_retry_at: null, last_sync_error: null }).eq('id', account.id);
   }
 
   return new Response(JSON.stringify({ ok: true, synced_count: synced.length, profiles: synced }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });

@@ -149,6 +149,8 @@ Deno.serve(async (request) => {
       status: result.status,
       buffer_update_id: result.provider === 'buffer' ? result.externalId : null,
       direct_post_id: result.provider === 'direct' ? result.externalId : null,
+      provider_status: result.status === 'queued' ? 'pending' : result.status,
+      provider_status_checked_at: new Date().toISOString(),
       published_at: result.status === 'published' ? new Date().toISOString() : null,
       last_error: null,
       last_error_code: null,

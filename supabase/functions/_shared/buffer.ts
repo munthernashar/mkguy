@@ -25,11 +25,51 @@ export const getBufferConfig = () => ({
   redirectUri: requireEnv('BUFFER_REDIRECT_URI'),
 });
 
-export const encodeOpaqueToken = (raw: string): string => btoa(raw);
-export const decodeOpaqueToken = (encoded: string | null): string | null => {
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+let cryptoKeyPromise: Promise<CryptoKey> | null = null;
+
+const getTokenCryptoKey = async (): Promise<CryptoKey> => {
+  if (!cryptoKeyPromise) {
+    const secret = requireEnv('TOKEN_ENCRYPTION_KEY');
+    const keyBytes = textEncoder.encode(secret);
+    const digest = await crypto.subtle.digest('SHA-256', keyBytes);
+    cryptoKeyPromise = crypto.subtle.importKey('raw', digest, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+  }
+  return cryptoKeyPromise;
+};
+
+const toBase64 = (bytes: Uint8Array): string => btoa(String.fromCharCode(...bytes));
+const fromBase64 = (value: string): Uint8Array => Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
+
+export const encryptTokenRef = async (raw: string): Promise<string> => {
+  if (!raw) return '';
+  const key = await getTokenCryptoKey();
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const cipher = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, textEncoder.encode(raw));
+  return `v1:${toBase64(iv)}:${toBase64(new Uint8Array(cipher))}`;
+};
+
+export const decryptTokenRef = async (encoded: string | null): Promise<string | null> => {
   if (!encoded) return null;
+  if (!encoded.startsWith('v1:')) {
+    try {
+      return atob(encoded);
+    } catch {
+      return null;
+    }
+  }
+
+  const [_version, ivPart, cipherPart] = encoded.split(':');
+  if (!ivPart || !cipherPart) return null;
   try {
-    return atob(encoded);
+    const key = await getTokenCryptoKey();
+    const decrypted = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: fromBase64(ivPart) },
+      key,
+      fromBase64(cipherPart),
+    );
+    return textDecoder.decode(decrypted);
   } catch (_error) {
     return null;
   }
@@ -55,6 +95,30 @@ export const exchangeBufferCode = async (code: string): Promise<BufferTokenRespo
     const payload = await response.text();
     log('warn', 'buffer_exchange_failed', { status: response.status, payload });
     throw new Error('buffer_oauth_exchange_failed');
+  }
+
+  return await response.json();
+};
+
+export const refreshBufferToken = async (refreshToken: string): Promise<BufferTokenResponse> => {
+  const cfg = getBufferConfig();
+  const body = new URLSearchParams({
+    grant_type: 'refresh_token',
+    refresh_token: refreshToken,
+    client_id: cfg.clientId,
+    client_secret: cfg.clientSecret,
+  });
+
+  const response = await fetch(cfg.tokenUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body,
+  });
+
+  if (!response.ok) {
+    const payload = await response.text();
+    log('warn', 'buffer_refresh_failed', { status: response.status, payload });
+    throw new Error(`buffer_refresh_failed_${response.status}`);
   }
 
   return await response.json();
