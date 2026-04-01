@@ -64,6 +64,23 @@ export const signInWithMagicLink = async (email) => {
   }
 };
 
+export const signInWithPassword = async (email, password) => {
+  const { error } = await supabase.auth.signInWithPassword({ email, password });
+
+  if (error) {
+    logger.warn('password_login_failed', { reason: error.message, status: error.status });
+    throw new Error('Login mit E-Mail/Passwort fehlgeschlagen.');
+  }
+};
+
+export const signUpWithPassword = async (email, password) => {
+  const { error } = await supabase.auth.signUp({ email, password });
+  if (error) {
+    logger.warn('password_signup_failed', { reason: error.message, status: error.status });
+    throw new Error('Registrierung fehlgeschlagen.');
+  }
+};
+
 export const signOut = async () => {
   const { error } = await supabase.auth.signOut();
   if (error) {
@@ -80,6 +97,11 @@ export const exchangeAuthCode = async () => {
 
   const { data, error } = await supabase.auth.exchangeCodeForSession(code);
   if (error) {
+    const { data: currentSession } = await supabase.auth.getSession();
+    if (currentSession?.session) {
+      return currentSession.session;
+    }
+
     logger.warn('exchange_code_failed', { reason: error.message });
     throw new Error('Der Login-Link ist ungültig oder abgelaufen.');
   }

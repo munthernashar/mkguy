@@ -102,7 +102,7 @@ supabase secrets set \
 
 ## 6) Auth & Rollenmodell
 
-- Login via Magic-Link (`LoginView`), Callback-Verarbeitung (`AuthCallbackView`) und Zugriffsschutz (`SessionGuard`) im Frontend.
+- Login via Magic-Link **und** optional E-Mail/Passwort (`LoginView`), Callback-Verarbeitung (`AuthCallbackView`) und Zugriffsschutz (`SessionGuard`) im Frontend.
 - Rollen in `user_roles` mit `owner | editor | viewer`.
 - Standardregel: Ohne Rollen-Eintrag kein Zugriff auf inhaltliche Tabellen.
 - Initiales Owner-Seed: Der erste Benutzer in `auth.users` wird automatisch als `owner` in `user_roles` angelegt.
@@ -180,3 +180,9 @@ Fix:
 ### Browser-Extension Fehler (`background.js`, `FrameDoesNotExistError`)
 Diese Meldungen stammen typischerweise von Browser-Extensions, nicht aus der App selbst.
 Für Auth-Tests am besten im Inkognito-Fenster ohne Extensions testen.
+
+
+### Symptom: Magic-Link korrekt, aber trotzdem „ungültig oder abgelaufen“
+- Im Frontend gibt es nun zusätzlich E-Mail/Passwort-Login als Fallback.
+- Ursache ist oft ein bereits konsumierter PKCE-Link (z. B. durch Vorschau-Scanner) oder mehrfaches Öffnen des gleichen Links.
+- Workaround: neuen Link anfordern oder Passwort-Login verwenden.

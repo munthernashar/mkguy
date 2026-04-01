@@ -1,6 +1,6 @@
 import { PUBLIC_CONFIG } from './config.js';
 import { logger } from './logger.js';
-import { getCurrentView, getParam, getSession, signInWithMagicLink, signOut, exchangeAuthCode, writeAuditLog, buildViewUrl, hasAuthCode, readAuthError } from './auth.js';
+import { getCurrentView, getParam, getSession, signInWithMagicLink, signOut, exchangeAuthCode, writeAuditLog, buildViewUrl, hasAuthCode, readAuthError, signInWithPassword, signUpWithPassword } from './auth.js';
 
 const app = document.getElementById('app');
 const navButtons = document.querySelectorAll('button[data-view]');
@@ -24,15 +24,30 @@ const navigate = (viewName, extra = {}) => {
 const LoginView = () => `
   <section class="card">
     <h2>Login</h2>
-    <p class="muted">Melde dich mit einem Magic-Link an.</p>
+    <p class="muted">Du kannst dich per Magic-Link oder Passwort anmelden.</p>
+
+    <h3>Magic-Link</h3>
     <form id="magic-link-form">
-      <label for="email">E-Mail</label><br/>
-      <input id="email" name="email" type="email" required placeholder="you@example.com" style="margin:0.5rem 0;padding:0.5rem;border-radius:6px;border:1px solid #475569;background:#0b1220;color:#e2e8f0;"/>
+      <label for="magic-email">E-Mail</label><br/>
+      <input id="magic-email" name="email" type="email" required placeholder="you@example.com" style="margin:0.5rem 0;padding:0.5rem;border-radius:6px;border:1px solid #475569;background:#0b1220;color:#e2e8f0;"/>
       <div>
         <button id="send-link" type="submit">Magic Link senden</button>
       </div>
-      <p class="muted" id="login-status"></p>
     </form>
+
+    <h3>E-Mail + Passwort</h3>
+    <form id="password-form">
+      <label for="password-email">E-Mail</label><br/>
+      <input id="password-email" name="email" type="email" required placeholder="you@example.com" style="margin:0.5rem 0;padding:0.5rem;border-radius:6px;border:1px solid #475569;background:#0b1220;color:#e2e8f0;"/><br/>
+      <label for="password">Passwort</label><br/>
+      <input id="password" name="password" type="password" required minlength="8" placeholder="••••••••" style="margin:0.5rem 0;padding:0.5rem;border-radius:6px;border:1px solid #475569;background:#0b1220;color:#e2e8f0;"/>
+      <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+        <button id="password-login" type="submit">Mit Passwort einloggen</button>
+        <button id="password-signup" type="button">Account anlegen</button>
+      </div>
+    </form>
+
+    <p class="muted" id="login-status"></p>
   </section>
 `;
 
@@ -64,8 +79,9 @@ const SessionGuard = async (viewName) => {
 };
 
 const bindLoginEvents = () => {
-  const form = document.getElementById('magic-link-form');
-  const button = document.getElementById('send-link');
+  const magicForm = document.getElementById('magic-link-form');
+  const passwordForm = document.getElementById('password-form');
+  const signUpButton = document.getElementById('password-signup');
   const status = document.getElementById('login-status');
 
   const existingError = readAuthError();
@@ -73,9 +89,10 @@ const bindLoginEvents = () => {
     status.textContent = existingError;
   }
 
-  form?.addEventListener('submit', async (event) => {
+  magicForm?.addEventListener('submit', async (event) => {
     event.preventDefault();
-    const email = form.email.value.trim();
+    const button = document.getElementById('send-link');
+    const email = magicForm.email.value.trim();
     if (!email) return;
 
     button.disabled = true;
@@ -83,17 +100,53 @@ const bindLoginEvents = () => {
 
     try {
       await signInWithMagicLink(email);
-      if (status) {
-        status.textContent = 'Magic-Link gesendet. Prüfe dein Postfach (inkl. Spam).';
-      }
+      if (status) status.textContent = 'Magic-Link gesendet. Prüfe dein Postfach (inkl. Spam).';
     } catch (error) {
-      if (status) {
-        status.textContent = error.message;
-      }
+      if (status) status.textContent = error.message;
     } finally {
       setTimeout(() => {
         button.disabled = false;
       }, 1500);
+    }
+  });
+
+  passwordForm?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const button = document.getElementById('password-login');
+    const email = passwordForm.email.value.trim();
+    const password = passwordForm.password.value;
+    if (!email || !password) return;
+
+    button.disabled = true;
+    if (status) status.textContent = 'Login läuft…';
+
+    try {
+      await signInWithPassword(email, password);
+      await writeAuditLog('login', { source: 'frontend', method: 'password' });
+      navigate('health');
+    } catch (error) {
+      if (status) status.textContent = error.message;
+    } finally {
+      button.disabled = false;
+    }
+  });
+
+  signUpButton?.addEventListener('click', async () => {
+    const email = passwordForm.email.value.trim();
+    const password = passwordForm.password.value;
+    if (!email || !password) {
+      if (status) status.textContent = 'Bitte E-Mail und Passwort eingeben.';
+      return;
+    }
+
+    signUpButton.disabled = true;
+    try {
+      await signUpWithPassword(email, password);
+      if (status) status.textContent = 'Account angelegt. Je nach Supabase-Einstellung bitte E-Mail bestätigen.';
+    } catch (error) {
+      if (status) status.textContent = error.message;
+    } finally {
+      signUpButton.disabled = false;
     }
   });
 };
@@ -129,7 +182,7 @@ const handleAuthCallback = async () => {
 
   try {
     await exchangeAuthCode();
-    await writeAuditLog('login', { source: 'frontend' });
+    await writeAuditLog('login', { source: 'frontend', method: 'magic_link' });
     const target = getParam('next') || buildViewUrl('health');
     window.location.replace(target);
   } catch (error) {
