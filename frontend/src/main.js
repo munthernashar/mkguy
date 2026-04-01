@@ -18,6 +18,30 @@ const DIRECT_CAPABILITY_MATRIX = {
   x: { textOnly: true, media: false, scheduling: false },
 };
 
+const PROFILE_CONNECTION_FLOW = {
+  CONNECTED: 'connected',
+  EXPIRED: 'expired',
+  RECONNECT_REQUIRED: 'reconnect required',
+};
+
+const PROVIDER_ERROR_ACTIONS = [
+  {
+    match: /buffer_token_missing|buffer_account_missing|buffer_profile_missing|direct_auth_not_connected|direct_token_missing/i,
+    action: 'neu verbinden',
+    hint: 'Verbindung ist abgelaufen oder fehlt. Bitte über „Buffer verbinden/Reconnect“ erneut autorisieren.',
+  },
+  {
+    match: /direct_platform_account_missing|buffer_profile_missing|profile_not_found|invalid_profile/i,
+    action: 'profil neu zuordnen',
+    hint: 'Das zugeordnete Profil passt nicht mehr. Bitte Profil-Mapping prüfen und neu zuordnen.',
+  },
+  {
+    match: /publish_failed|buffer_api_failed_5|timeout|rate_limit|temporar/i,
+    action: 'retry später',
+    hint: 'Provider aktuell nicht stabil erreichbar. Bitte später erneut versuchen.',
+  },
+];
+
 const CTA_HINTS = ['Starte jetzt', 'Kostenlos testen', 'Mehr erfahren', 'Termin buchen'];
 const HOOK_HINTS = ['Provokante Frage', 'Statistik als Einstieg', 'Vorher/Nachher', 'Story in 1 Satz'];
 const WORKFLOW_STATUSES = ['draft', 'review', 'approved', 'scheduled', 'publishing', 'posted', 'failed', 'archived'];
@@ -60,6 +84,8 @@ const state = {
     accounts: [],
     profiles: [],
     profileMap: {},
+    profileConnectionFlow: {},
+    profileErrorActions: {},
     debug: null,
     publishVia: 'buffer',
     platformAccounts: [],
@@ -344,6 +370,48 @@ const getPreApprovalChecks = (post) => {
   };
 };
 
+const mapProviderErrorToAction = (errorCode = '', errorMessage = '') => {
+  const search = `${errorCode} ${errorMessage}`.trim();
+  const matched = PROVIDER_ERROR_ACTIONS.find((entry) => entry.match.test(search));
+  return matched ?? {
+    action: 'retry später',
+    hint: 'Unbekannter Providerfehler. Bitte Logs prüfen und danach erneut versuchen.',
+  };
+};
+
+const getProfileConnectionStatus = ({ accountStatus, latestErrorCode, hasMapping }) => {
+  if (!hasMapping) return PROFILE_CONNECTION_FLOW.RECONNECT_REQUIRED;
+  if (['expired', 'revoked', 'error'].includes(accountStatus)) return PROFILE_CONNECTION_FLOW.EXPIRED;
+  if (/token|auth|profile_missing|account_missing/i.test(latestErrorCode ?? '')) return PROFILE_CONNECTION_FLOW.RECONNECT_REQUIRED;
+  return PROFILE_CONNECTION_FLOW.CONNECTED;
+};
+
+const runPublishPrevalidations = ({ post, publishVia, mappedProfileId, mappedPlatformAccount, scheduledAt }) => {
+  const checks = getPreApprovalChecks(post);
+  const selectedVariant = post.variants.find((variant) => variant.is_selected) ?? post.variants[0];
+  const media = post.hasImage ? [{ url: 'https://picsum.photos/1080/1080.jpg', mime_type: 'image/jpeg', width: 1080, height: 1080 }] : [];
+  const directCaps = DIRECT_CAPABILITY_MATRIX[post.platform] ?? { textOnly: false, media: false, scheduling: false };
+  const errors = [];
+
+  if (!checks.text) errors.push('Text fehlt.');
+  if (!checks.cta) errors.push('CTA fehlt.');
+  if (!checks.validLink) errors.push('Link/UTM ungültig.');
+  if (!checks.platformLength) errors.push(`Text überschreitet das Plattformlimit (${checks.textLength}/${checks.textLimit}).`);
+  if (!checks.imageRequired) errors.push(`Bild ist für ${post.platform} verpflichtend.`);
+
+  if (publishVia === 'buffer' && !mappedProfileId) errors.push(`Kein Buffer-Profil für ${post.platform} gemappt.`);
+  if (publishVia === 'direct' && !mappedPlatformAccount) errors.push(`Kein Direct-Account für ${post.platform} verbunden.`);
+  if (publishVia === 'direct' && media.length > 0 && !directCaps.media) errors.push(`Nicht unterstützt: direct + Media für ${post.platform}.`);
+  if (publishVia === 'direct' && scheduledAt && !directCaps.scheduling) errors.push(`Nicht unterstützt: direct + Scheduling für ${post.platform}.`);
+
+  return {
+    ok: errors.length === 0,
+    errors,
+    selectedVariant,
+    media,
+  };
+};
+
 const hasRolePermission = (action) => {
   if (state.currentRole === 'owner') return true;
   const editorPermissions = ['edit', 'submit_review', 'regenerate_hashtags', 'select_winner', 'archive'];
@@ -523,6 +591,9 @@ const StudioView = () => {
   const campaigns = state.campaignWorkspace.campaigns ?? [];
   const selectedCampaignId = state.campaignWorkspace.selectedCampaignId;
   const selectedCampaign = campaigns.find((campaign) => campaign.id === selectedCampaignId) ?? null;
+  const mappedBufferProfileId = state.buffer.profileMap[selected.platform] ?? null;
+  const profileConnectionFlow = state.buffer.profileConnectionFlow[selected.platform] ?? PROFILE_CONNECTION_FLOW.RECONNECT_REQUIRED;
+  const profileErrorAction = state.buffer.profileErrorActions[selected.platform] ?? null;
   const selectedSeriesRule = state.campaignWorkspace.seriesRules.find((rule) => rule.campaign_id === selectedCampaignId) ?? null;
   const activePlatformMix = parseStringArray(selectedCampaign?.platform_mix, []);
   const cadence = parseObject(selectedCampaign?.cadence, {});
@@ -802,7 +873,10 @@ const StudioView = () => {
         <button id="buffer-reconnect">Reconnect</button>
         <button id="buffer-sync">sync-buffer-profiles</button>
       </div>
-      <p class="muted">Verbindungsstatus: ${state.buffer.accounts[0]?.access_status ?? 'nicht verbunden'}</p>
+      <p class="muted">Account-Status: ${state.buffer.accounts[0]?.access_status ?? 'nicht verbunden'} • Profilstatus (${selected.platform}): <strong>${profileConnectionFlow}</strong></p>
+      <p class="muted">Statusflow: connected → expired → reconnect required (pro Plattformprofil).</p>
+      ${mappedBufferProfileId ? `<p class="muted">Gemapptes Buffer-Profil: <code>${mappedBufferProfileId}</code></p>` : '<p class="danger">Kein Profil gemappt: reconnect required.</p>'}
+      ${profileErrorAction ? `<p class="danger">Provider-Hinweis: <strong>${profileErrorAction.action}</strong> — ${profileErrorAction.hint}</p>` : '<p class="muted">Keine aktuellen Providerfehler für dieses Plattformprofil.</p>'}
       <label>Profil-Mapping (${selected.platform})
         <select id="buffer-profile-map">
           <option value="">Kein Profil</option>
@@ -1070,7 +1144,7 @@ const loadPdfWorkspace = async (session) => {
 };
 
 const loadBufferState = async () => {
-  const { data: accounts } = await supabase.from('buffer_accounts').select('id, access_status, access_status, status').eq('status', 'active').order('updated_at', { ascending: false }).limit(1);
+  const { data: accounts } = await supabase.from('buffer_accounts').select('id, access_status, last_sync_error, status').eq('status', 'active').order('updated_at', { ascending: false }).limit(1);
   state.buffer.accounts = accounts ?? [];
   state.buffer.accountId = accounts?.[0]?.id ?? null;
 
@@ -1086,6 +1160,35 @@ const loadBufferState = async () => {
 
   const { data: latestJob } = await supabase.from('publish_jobs').select('provider, buffer_update_id, attempts, last_error').order('created_at', { ascending: false }).limit(1);
   state.buffer.debug = latestJob?.[0] ?? null;
+
+  const { data: recentProfileErrors } = await supabase
+    .from('publish_jobs')
+    .select('buffer_profile_id, last_error_code, last_error, updated_at')
+    .not('last_error_code', 'is', null)
+    .order('updated_at', { ascending: false })
+    .limit(100);
+
+  const accountStatus = state.buffer.accounts[0]?.access_status ?? null;
+  const profileConnectionFlow = {};
+  const profileErrorActions = {};
+
+  ['linkedin', 'instagram', 'x', 'facebook', 'threads', 'tiktok', 'youtube', 'pinterest'].forEach((platform) => {
+    const mappedProfileId = state.buffer.profileMap[platform] ?? null;
+    const latestError = (recentProfileErrors ?? []).find((entry) => (
+      mappedProfileId && entry.buffer_profile_id === mappedProfileId
+    ));
+    profileConnectionFlow[platform] = getProfileConnectionStatus({
+      accountStatus,
+      latestErrorCode: latestError?.last_error_code ?? state.buffer.accounts[0]?.last_sync_error ?? '',
+      hasMapping: Boolean(mappedProfileId),
+    });
+    if (latestError?.last_error_code || latestError?.last_error) {
+      profileErrorActions[platform] = mapProviderErrorToAction(latestError.last_error_code, latestError.last_error);
+    }
+  });
+
+  state.buffer.profileConnectionFlow = profileConnectionFlow;
+  state.buffer.profileErrorActions = profileErrorActions;
 
   const { data: monitoring } = await supabase.rpc('job_monitoring_dashboard', { p_window_hours: 24 });
   state.monitor.summary = monitoring ?? null;
@@ -2266,13 +2369,16 @@ const bindStudioEvents = () => {
     const publishVia = state.buffer.publishVia;
     const mappedProfileId = state.buffer.profileMap[post.platform];
     const mappedPlatformAccount = state.buffer.platformAccounts.find((account) => account.platform === post.platform);
-    if (publishVia === 'buffer' && !mappedProfileId) return setStatus(`Kein Buffer-Profil für ${post.platform} gemappt.`);
-    if (publishVia === 'direct' && !mappedPlatformAccount) return setStatus(`Kein Direct-Account für ${post.platform} verbunden.`);
-    const selectedVariant = post.variants.find((v) => v.is_selected) ?? post.variants[0];
-    const media = post.hasImage ? [{ url: 'https://picsum.photos/1080/1080.jpg', mime_type: 'image/jpeg', width: 1080, height: 1080 }] : [];
-    const directCaps = DIRECT_CAPABILITY_MATRIX[post.platform] ?? { textOnly: false, media: false, scheduling: false };
-    if (publishVia === 'direct' && media.length > 0 && !directCaps.media) return setStatus(`Nicht unterstützt: direct + Media für ${post.platform}.`);
-    if (publishVia === 'direct' && scheduledAt && !directCaps.scheduling) return setStatus(`Nicht unterstützt: direct + Scheduling für ${post.platform}.`);
+    const validation = runPublishPrevalidations({
+      post,
+      publishVia,
+      mappedProfileId,
+      mappedPlatformAccount,
+      scheduledAt,
+    });
+    if (!validation.ok) {
+      return setStatus(`Vorabvalidierung fehlgeschlagen (${scheduledAt ? 'Scheduled' : 'Sofort'}): ${validation.errors.join(' | ')}`);
+    }
     const { data, error } = await supabase.functions.invoke('publish-via-buffer', {
       body: {
         post_id: post.id,
@@ -2280,12 +2386,29 @@ const bindStudioEvents = () => {
         platform_account_id: mappedPlatformAccount?.id ?? null,
         publish_via: publishVia,
         platform: post.platform,
-        text: selectedVariant?.text ?? post.title,
-        media,
+        text: validation.selectedVariant?.text ?? post.title,
+        media: validation.media,
         scheduled_at: scheduledAt,
       },
     });
-    if (error) return setStatus(`publish-via-buffer Fehler: ${error.message}`);
+    if (error || data?.ok === false) {
+      const action = mapProviderErrorToAction(data?.error, error?.message ?? '');
+      state.buffer.profileErrorActions[post.platform] = action;
+      state.buffer.profileConnectionFlow[post.platform] = getProfileConnectionStatus({
+        accountStatus: state.buffer.accounts[0]?.access_status ?? null,
+        latestErrorCode: data?.error ?? error?.message ?? '',
+        hasMapping: Boolean(mappedProfileId),
+      });
+      renderLayout(StudioView());
+      bindStudioEvents();
+      return setStatus(`publish-via-buffer Fehler: ${data?.error ?? error?.message ?? 'unknown_error'} → Aktion: ${action.action}. ${action.hint}`);
+    }
+    state.buffer.profileErrorActions[post.platform] = null;
+    state.buffer.profileConnectionFlow[post.platform] = getProfileConnectionStatus({
+      accountStatus: state.buffer.accounts[0]?.access_status ?? null,
+      latestErrorCode: '',
+      hasMapping: Boolean(mappedProfileId),
+    });
     state.buffer.debug = {
       provider: publishVia,
       buffer_update_id: data?.buffer_update_id ?? null,
