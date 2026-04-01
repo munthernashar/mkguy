@@ -1,0 +1,6 @@
+# DB-Backup Job-Definition (UTC)
+# Täglich 02:15 UTC: Produktionsdump + Manifest + Retention
+15 2 * * * /bin/bash -lc 'cd /workspace/mkguy && BACKUP_DB_URL="$BACKUP_DB_URL" BACKUP_DIR="/var/backups/mkguy" RETENTION_DAYS=14 ./scripts/ops/backup_restore_ops.sh backup >> /var/log/mkguy/db-backup.log 2>&1'
+
+# Restore-Probe in Staging: jeden Montag 03:00 UTC mit letztem Dump
+0 3 * * 1 /bin/bash -lc 'cd /workspace/mkguy && STAGING_DB_URL="$STAGING_DB_URL" DUMP_FILE="$(ls -1t /var/backups/mkguy/db_*.dump | head -n1)" ./scripts/ops/backup_restore_ops.sh restore-check >> /var/log/mkguy/db-restore-check.log 2>&1'
