@@ -175,6 +175,7 @@ const applyFilters = (post) => Object.entries(state.filters).every(([key, value]
 });
 
 const getPost = () => state.posts.find((p) => p.id === state.selectedId) ?? state.posts[0];
+const createPostId = () => `post-${Date.now()}`;
 
 const canTransition = (current, target) => TRANSITIONS[current]?.includes(target);
 
@@ -289,7 +290,10 @@ const StudioView = () => {
 
     <section class="card split">
       <div>
-        <h3>Content Studio</h3>
+        <div class="inline-actions">
+          <h3>Content Studio</h3>
+          <button id="create-post">Neuer Post</button>
+        </div>
         <p class="muted">Editor mit Varianten A/B/C, Zeichenzähler, CTA-/Hook-Hinweisen und Freigabechecks.</p>
         ${visiblePosts.map((post) => `
           <div class="list-item">
@@ -596,6 +600,31 @@ const bindStudioEvents = () => {
       renderLayout(StudioView());
       bindStudioEvents();
     });
+  });
+
+  document.getElementById('create-post')?.addEventListener('click', () => {
+    const newPost = {
+      id: createPostId(),
+      title: 'Neuer Post',
+      section: 'Content Studio',
+      book: 'Unassigned',
+      campaign: 'Drafts',
+      platform: 'linkedin',
+      language: 'de',
+      tags: [],
+      status: 'draft',
+      cta: '',
+      hook: '',
+      link: '',
+      utm: '',
+      hasImage: false,
+      variants: [{ name: 'A', text: '', is_selected: true }],
+      hashtags: [],
+    };
+    state.posts.unshift(newPost);
+    state.selectedId = newPost.id;
+    renderLayout(StudioView());
+    bindStudioEvents();
   });
 
   document.querySelectorAll('[data-variant]').forEach((button) => {
