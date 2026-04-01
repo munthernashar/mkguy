@@ -14,6 +14,7 @@ import {
 type RequestPayload = {
   book_id: string;
   campaign_id?: string;
+  job_id?: string;
   seed_ids?: string[];
   platforms?: string[];
   languages?: Array<'de' | 'en'>;
@@ -23,12 +24,81 @@ type RequestPayload = {
   use_cache?: boolean;
 };
 
-const templateFor = (platform: string, language: 'de' | 'en', seed: string, insight: string, ctaLink: string, variantLabel: string) => {
-  const intro = language === 'de' ? `Variante ${variantLabel}: ${seed}` : `Variant ${variantLabel}: ${seed}`;
-  const proofPrefix = language === 'de' ? 'Beleg aus dem Buch' : 'Evidence from the book';
-  const cta = language === 'de' ? `Jetzt mehr erfahren: ${ctaLink}` : `Learn more now: ${ctaLink}`;
-  const platformHint = language === 'de' ? `Für ${platform} optimiert.` : `Optimized for ${platform}.`;
-  return `${intro}\n\n${proofPrefix}: ${insight}\n${platformHint}\n${cta}`;
+const OPENAI_MODEL = Deno.env.get('OPENAI_MODEL_SOCIAL') ?? Deno.env.get('OPENAI_MODEL') ?? 'gpt-4.1-mini';
+
+const callOpenAITextVariant = async (params: {
+  platform: string;
+  language: 'de' | 'en';
+  variantLabel: string;
+  seed: string;
+  insight: string;
+  ctaLink: string;
+  doWords: string[];
+  dontWords: string[];
+}) => {
+  const apiKey = Deno.env.get('OPENAI_API_KEY');
+  if (!apiKey) throw new Error('openai_key_missing');
+
+  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      temperature: 0.6,
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'post_variant',
+          strict: true,
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['content', 'platform', 'language', 'variant_label'],
+            properties: {
+              platform: { type: 'string' },
+              language: { type: 'string', enum: ['de', 'en'] },
+              variant_label: { type: 'string' },
+              content: { type: 'string', minLength: 20 },
+            },
+          },
+        },
+      },
+      messages: [
+        {
+          role: 'system',
+          content: 'Du erzeugst präzise Social-Media-Posts. Gib ausschließlich valides JSON laut Schema zurück.',
+        },
+        {
+          role: 'user',
+          content: [
+            `Platform: ${params.platform}`,
+            `Language: ${params.language}`,
+            `Variant: ${params.variantLabel}`,
+            `Seed: ${params.seed}`,
+            `Evidence from book: ${params.insight}`,
+            `Required CTA link: ${params.ctaLink}`,
+            `Preferred brand words: ${params.doWords.join(', ') || 'none'}`,
+            `Forbidden words: ${params.dontWords.join(', ') || 'none'}`,
+            'Requirements: include a clear CTA and include the CTA link verbatim.',
+          ].join('\n'),
+        },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`openai_post_variant_failed:${response.status}:${body.slice(0, 300)}`);
+  }
+
+  const json = await response.json();
+  const content = json?.choices?.[0]?.message?.content;
+  const parsed = JSON.parse(String(content ?? '{}')) as { content?: string; platform?: string; language?: string; variant_label?: string };
+  if (!parsed.content) throw new Error('openai_post_variant_invalid_json');
+  return parsed;
 };
 
 Deno.serve(async (request) => {
@@ -38,9 +108,11 @@ Deno.serve(async (request) => {
   if (request.method !== 'POST') return jsonResponse({ ok: false, error: 'method_not_allowed' }, 405, corsHeaders);
 
   const supabase = createClient(Deno.env.get('SUPABASE_URL') ?? '', Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+  let parsedPayload: RequestPayload = { book_id: '' };
 
   try {
     const payload = (await request.json()) as RequestPayload;
+    parsedPayload = payload;
     if (!payload.book_id) return jsonResponse({ ok: false, error: 'book_id_required' }, 400, corsHeaders);
 
     const platforms = (payload.platforms?.length ? payload.platforms : ['linkedin', 'x', 'threads', 'instagram']).map((v) => v.toLowerCase());
@@ -111,8 +183,22 @@ Deno.serve(async (request) => {
     const dontWords = normalizeWordList(brandKit?.dont_words);
 
     const usedTokens = estimateTokens(JSON.stringify(seedRows), JSON.stringify(sourceFacts));
-    if (payload.token_budget?.book && usedTokens > payload.token_budget.book) {
-      return jsonResponse({ ok: false, error: 'token_budget_book_exceeded', used_tokens: usedTokens }, 422, corsHeaders);
+    const targetVariants = seedRows.slice(0, batchSize).length * platforms.length * languages.length * variantsPerPlatform;
+    const projectedTokens = usedTokens + targetVariants * 220;
+    if (payload.token_budget?.book && projectedTokens > payload.token_budget.book) {
+      await supabase.from('generation_jobs').upsert({
+        id: payload.job_id,
+        campaign_id: payload.campaign_id ?? null,
+        provider: 'openai',
+        model: OPENAI_MODEL,
+        initiated_by: book.created_by,
+        status: 'failed',
+        error_message: 'token_budget_book_exceeded',
+        request_payload: cacheKeyPayload,
+        result_payload: { used_tokens: usedTokens, projected_tokens: projectedTokens },
+        completed_at: new Date().toISOString(),
+      }, { onConflict: 'id' });
+      return jsonResponse({ ok: false, error: 'token_budget_book_exceeded', used_tokens: projectedTokens }, 422, corsHeaders);
     }
 
     if (payload.campaign_id && payload.token_budget?.campaign) {
@@ -126,8 +212,20 @@ Deno.serve(async (request) => {
         const val = Number((job.result_payload as Record<string, unknown>)?.estimated_tokens ?? 0);
         return acc + (Number.isFinite(val) ? val : 0);
       }, 0);
-      if (campaignUsed + usedTokens > payload.token_budget.campaign) {
-        return jsonResponse({ ok: false, error: 'token_budget_campaign_exceeded', used_tokens: campaignUsed + usedTokens }, 422, corsHeaders);
+      if (campaignUsed + projectedTokens > payload.token_budget.campaign) {
+        await supabase.from('generation_jobs').upsert({
+          id: payload.job_id,
+          campaign_id: payload.campaign_id ?? null,
+          provider: 'openai',
+          model: OPENAI_MODEL,
+          initiated_by: book.created_by,
+          status: 'failed',
+          error_message: 'token_budget_campaign_exceeded',
+          request_payload: cacheKeyPayload,
+          result_payload: { used_tokens: campaignUsed + projectedTokens, projected_tokens: projectedTokens },
+          completed_at: new Date().toISOString(),
+        });
+        return jsonResponse({ ok: false, error: 'token_budget_campaign_exceeded', used_tokens: campaignUsed + projectedTokens }, 422, corsHeaders);
       }
     }
 
@@ -163,14 +261,17 @@ Deno.serve(async (request) => {
 
           const variants = VARIANT_LABELS.slice(0, variantsPerPlatform);
           for (const variantLabel of variants) {
-            const rendered = templateFor(
+            const renderedJson = await callOpenAITextVariant({
               platform,
               language,
-              seed.seed_text,
-              sourceFacts[0] ?? (language === 'de' ? 'Keine belastbaren Erkenntnisse verfügbar.' : 'No proven insight available.'),
-              seed.source_link ?? 'https://example.com',
+              seed: seed.seed_text,
+              insight: sourceFacts[0] ?? (language === 'de' ? 'Keine belastbaren Erkenntnisse verfügbar.' : 'No proven insight available.'),
+              ctaLink: seed.source_link ?? 'https://example.com',
               variantLabel,
-            );
+              doWords,
+              dontWords,
+            });
+            const rendered = renderedJson.content;
 
             const lengthCheck = enforcePlatformLength(platform, rendered);
             const guardrail = evaluateGuardrails({
@@ -218,13 +319,14 @@ Deno.serve(async (request) => {
       created_variants: createdVariantIds.length,
       variants_per_platform: variantsPerPlatform,
       batch_size: batchSize,
-      estimated_tokens: usedTokens,
+      estimated_tokens: projectedTokens,
     };
 
-    await supabase.from('generation_jobs').insert({
+    await supabase.from('generation_jobs').upsert({
+      id: payload.job_id,
       campaign_id: payload.campaign_id ?? null,
-      provider: 'internal',
-      model: 'template-v1',
+      provider: 'openai',
+      model: OPENAI_MODEL,
       initiated_by: book.created_by,
       status: 'completed',
       request_payload: cacheKeyPayload,
@@ -241,6 +343,17 @@ Deno.serve(async (request) => {
 
     return jsonResponse({ ok: true, ...responsePayload }, 200, corsHeaders);
   } catch (error) {
+    await supabase.from('generation_jobs').upsert({
+      id: parsedPayload.job_id,
+      campaign_id: parsedPayload.campaign_id ?? null,
+      provider: 'openai',
+      model: OPENAI_MODEL,
+      status: 'failed',
+      error_message: String(error).slice(0, 500),
+      request_payload: parsedPayload,
+      result_payload: {},
+      completed_at: new Date().toISOString(),
+    });
     log('error', 'generate_post_text_failed', { error: String(error) });
     return jsonResponse({ ok: false, error: String(error) }, 422, corsHeaders);
   }
