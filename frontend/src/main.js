@@ -47,6 +47,11 @@ const state = {
     publishVia: 'buffer',
     platformAccounts: [],
   },
+  monitor: {
+    summary: null,
+    deadLetters: { publish: [], generation: [] },
+    selectedDetail: null,
+  },
 
   posts: [
     {
@@ -251,6 +256,13 @@ const StudioView = () => {
   const text = selectedVariant?.text ?? '';
   const limits = PLATFORM_LIMITS[selected.platform] || PLATFORM_LIMITS.linkedin;
   const overLimit = text.length > limits.text;
+  const monitor = state.monitor.summary ?? {};
+  const publishStatus = monitor.publish_status_distribution ?? {};
+  const generationStatus = monitor.generation_status_distribution ?? {};
+  const topErrors = monitor.top_error_codes ?? [];
+  const errorList = monitor.error_list ?? [];
+  const publishDeadLetters = state.monitor.deadLetters.publish ?? [];
+  const generationDeadLetters = state.monitor.deadLetters.generation ?? [];
 
   return `
     <section class="card">
@@ -387,6 +399,58 @@ const StudioView = () => {
         <li>Attempts: <code>${state.buffer.debug?.attempts ?? '—'}</code></li>
         <li>Letzter Fehler: <code>${state.buffer.debug?.last_error ?? '—'}</code></li>
       </ul>
+      <h4>Monitoring-Dashboard</h4>
+      <div class="inline-actions">
+        <button id="refresh-monitor">Dashboard aktualisieren</button>
+        <button id="recover-stuck-jobs">recover-stuck-jobs</button>
+      </div>
+      <p class="muted">Publish Success-Rate (24h): <code>${Number(monitor.success_rate ?? 0) * 100}%</code> • Ø Publish-Latenz: <code>${monitor.publish_latency_seconds ?? 0}s</code></p>
+      <p class="muted">Dead-Letter: Publish <code>${monitor.dead_letter?.publish ?? 0}</code> • Generation <code>${monitor.dead_letter?.generation ?? 0}</code></p>
+      <h5>Statusverteilung</h5>
+      <ul>
+        <li>Publish: <code>${JSON.stringify(publishStatus)}</code></li>
+        <li>Generation: <code>${JSON.stringify(generationStatus)}</code></li>
+      </ul>
+      <h5>Top-Fehlercodes</h5>
+      <ul>
+        ${topErrors.map((item) => `<li><code>${item.code}</code>: ${item.count}</li>`).join('') || '<li class="muted">Keine Fehler im Zeitfenster.</li>'}
+      </ul>
+      <h5>Fehlerliste</h5>
+      <ul>
+        ${errorList.map((item) => `<li><code>${item.last_error_code}</code> • ${item.status} • ${new Date(item.updated_at).toLocaleString()}<br/><span class="muted">${item.last_error ?? '—'}</span></li>`).join('') || '<li class="muted">Keine Fehler.</li>'}
+      </ul>
+      <h5>Dead-Letter Aktionen</h5>
+      <p class="muted">Bei Token-/Verbindungsproblemen erst Verbindung erneuern (Buffer Connect/Reconnect + Sync) und erst dann manuell retry ausführen.</p>
+      <div class="grid">
+        <div>
+          <strong>Publish Dead-Letter</strong>
+          ${publishDeadLetters.map((job) => `
+            <div class="list-item">
+              <div><code>${job.id}</code> • ${job.last_error_code ?? 'unknown'}</div>
+              <div class="inline-actions">
+                <button data-detail-type="publish" data-detail-id="${job.id}">Details</button>
+                <button data-retry-type="publish" data-retry-id="${job.id}">Retry</button>
+                <button data-discard-type="publish" data-discard-id="${job.id}">Verwerfen</button>
+              </div>
+            </div>
+          `).join('') || '<p class="muted">Keine Publish-Dead-Letter.</p>'}
+        </div>
+        <div>
+          <strong>Generation Dead-Letter</strong>
+          ${generationDeadLetters.map((job) => `
+            <div class="list-item">
+              <div><code>${job.id}</code> • ${job.last_error_code ?? 'unknown'}</div>
+              <div class="inline-actions">
+                <button data-detail-type="generation" data-detail-id="${job.id}">Details</button>
+                <button data-retry-type="generation" data-retry-id="${job.id}">Retry</button>
+                <button data-discard-type="generation" data-discard-id="${job.id}">Verwerfen</button>
+              </div>
+            </div>
+          `).join('') || '<p class="muted">Keine Generation-Dead-Letter.</p>'}
+        </div>
+      </div>
+      <h5>Job-Details (redacted)</h5>
+      <pre>${state.monitor.selectedDetail ? JSON.stringify(state.monitor.selectedDetail, null, 2) : 'Noch kein Job gewählt.'}</pre>
       <p id="studio-status" class="muted"></p>
     </section>
   `;
@@ -410,6 +474,25 @@ const loadBufferState = async () => {
 
   const { data: latestJob } = await supabase.from('publish_jobs').select('provider, buffer_update_id, attempts, last_error').order('created_at', { ascending: false }).limit(1);
   state.buffer.debug = latestJob?.[0] ?? null;
+
+  const { data: monitoring } = await supabase.rpc('job_monitoring_dashboard', { p_window_hours: 24 });
+  state.monitor.summary = monitoring ?? null;
+
+  const { data: publishDead } = await supabase
+    .from('publish_jobs')
+    .select('id, last_error_code, last_error, dead_lettered_at, updated_at')
+    .eq('status', 'dead_letter')
+    .order('updated_at', { ascending: false })
+    .limit(20);
+  state.monitor.deadLetters.publish = publishDead ?? [];
+
+  const { data: generationDead } = await supabase
+    .from('generation_jobs')
+    .select('id, last_error_code, error_message, dead_lettered_at, updated_at')
+    .eq('status', 'dead_letter')
+    .order('updated_at', { ascending: false })
+    .limit(20);
+  state.monitor.deadLetters.generation = generationDead ?? [];
 };
 
 const SessionGuard = async (viewName) => {
@@ -672,6 +755,60 @@ const bindStudioEvents = () => {
     post.hashtags = tags.slice(0, limit);
     renderLayout(StudioView());
     bindStudioEvents();
+  });
+
+  document.getElementById('refresh-monitor')?.addEventListener('click', async () => {
+    await loadBufferState();
+    setStatus('Monitoring-Dashboard aktualisiert.');
+    renderLayout(StudioView());
+    bindStudioEvents();
+  });
+
+  document.getElementById('recover-stuck-jobs')?.addEventListener('click', async () => {
+    const { error } = await supabase.rpc('recover_stuck_jobs', { p_requeue_delay_seconds: 30 });
+    if (error) return setStatus(`recover-stuck-jobs fehlgeschlagen: ${error.message}`);
+    await loadBufferState();
+    setStatus('recover-stuck-jobs ausgeführt.');
+    renderLayout(StudioView());
+    bindStudioEvents();
+  });
+
+  document.querySelectorAll('[data-detail-id]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const jobType = button.dataset.detailType;
+      const jobId = button.dataset.detailId;
+      const { data, error } = await supabase.rpc('job_detail_redacted', { p_job_type: jobType, p_job_id: jobId });
+      if (error) return setStatus(`Detailabruf fehlgeschlagen: ${error.message}`);
+      state.monitor.selectedDetail = data;
+      renderLayout(StudioView());
+      bindStudioEvents();
+    });
+  });
+
+  document.querySelectorAll('[data-retry-id]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const jobType = button.dataset.retryType;
+      const jobId = button.dataset.retryId;
+      const { data, error } = await supabase.rpc('retry_dead_letter_job', { p_job_type: jobType, p_job_id: jobId });
+      if (error || !data) return setStatus(`Retry fehlgeschlagen: ${error?.message ?? 'not_allowed_or_not_dead_letter'}`);
+      await loadBufferState();
+      setStatus(`Dead-Letter Job ${jobId} wurde erneut in die Queue gestellt.`);
+      renderLayout(StudioView());
+      bindStudioEvents();
+    });
+  });
+
+  document.querySelectorAll('[data-discard-id]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const jobType = button.dataset.discardType;
+      const jobId = button.dataset.discardId;
+      const { data, error } = await supabase.rpc('discard_dead_letter_job', { p_job_type: jobType, p_job_id: jobId });
+      if (error || !data) return setStatus(`Verwerfen fehlgeschlagen: ${error?.message ?? 'not_allowed_or_not_dead_letter'}`);
+      await loadBufferState();
+      setStatus(`Dead-Letter Job ${jobId} wurde verworfen.`);
+      renderLayout(StudioView());
+      bindStudioEvents();
+    });
   });
 };
 
