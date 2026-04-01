@@ -78,6 +78,21 @@ const state = {
     insights: [],
     selectedBookId: null,
   },
+  campaignWorkspace: {
+    campaigns: [],
+    seriesRules: [],
+    evergreenRules: [],
+    calendarEvents: [],
+    bulkGenerationJobs: [],
+    bulkSchedulerJobs: [],
+    selectedCampaignId: 'all',
+    calendarView: 'month',
+    calendarAnchorDate: new Date().toISOString().slice(0, 10),
+    calendarFilters: {
+      platform: 'all',
+      status: 'all',
+    },
+  },
 
   posts: [
     {
@@ -386,6 +401,36 @@ const renderInsightList = (items) => {
   return items.map((item) => `<li>${escapeHtml(String(item))}</li>`).join('');
 };
 
+const isoDateInputValue = (value) => (value ? new Date(value).toISOString().slice(0, 16) : '');
+const parseStringArray = (value, fallback = []) => {
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'string') return value.split(',').map((item) => item.trim()).filter(Boolean);
+  return fallback;
+};
+const parseNumericArray = (value, fallback = []) => parseStringArray(value, fallback).map((item) => Number(item)).filter((num) => Number.isFinite(num));
+const parseObject = (value, fallback = {}) => (value && typeof value === 'object' && !Array.isArray(value) ? value : fallback);
+const startOfDay = (date) => new Date(`${date.toISOString().slice(0, 10)}T00:00:00.000Z`);
+const endOfDay = (date) => new Date(`${date.toISOString().slice(0, 10)}T23:59:59.999Z`);
+const getCalendarRange = (view, anchorDateInput) => {
+  const anchorDate = new Date(`${anchorDateInput}T12:00:00Z`);
+  if (Number.isNaN(anchorDate.getTime())) {
+    const now = new Date();
+    return { start: startOfDay(now), end: endOfDay(now) };
+  }
+  if (view === 'day') return { start: startOfDay(anchorDate), end: endOfDay(anchorDate) };
+  if (view === 'week') {
+    const weekday = anchorDate.getUTCDay();
+    const weekStart = new Date(anchorDate);
+    weekStart.setUTCDate(anchorDate.getUTCDate() - weekday);
+    const weekEnd = new Date(weekStart);
+    weekEnd.setUTCDate(weekStart.getUTCDate() + 6);
+    return { start: startOfDay(weekStart), end: endOfDay(weekEnd) };
+  }
+  const monthStart = new Date(Date.UTC(anchorDate.getUTCFullYear(), anchorDate.getUTCMonth(), 1));
+  const monthEnd = new Date(Date.UTC(anchorDate.getUTCFullYear(), anchorDate.getUTCMonth() + 1, 0));
+  return { start: startOfDay(monthStart), end: endOfDay(monthEnd) };
+};
+
 const LoginView = () => `
   <section class="card">
     <h2>Login</h2>
@@ -475,6 +520,24 @@ const StudioView = () => {
   const selectedAsset = state.mediaLibrary.assets.find((asset) => asset.id === selectedAssetId) ?? null;
   const ratioCheck = selectedAsset ? ratioValidation(selectedAsset, selected.platform) : null;
   const previewLimit = PREVIEW_LIMITS[selected.platform] ?? 280;
+  const campaigns = state.campaignWorkspace.campaigns ?? [];
+  const selectedCampaignId = state.campaignWorkspace.selectedCampaignId;
+  const selectedCampaign = campaigns.find((campaign) => campaign.id === selectedCampaignId) ?? null;
+  const selectedSeriesRule = state.campaignWorkspace.seriesRules.find((rule) => rule.campaign_id === selectedCampaignId) ?? null;
+  const activePlatformMix = parseStringArray(selectedCampaign?.platform_mix, []);
+  const cadence = parseObject(selectedCampaign?.cadence, {});
+  const calendarRange = getCalendarRange(state.campaignWorkspace.calendarView, state.campaignWorkspace.calendarAnchorDate);
+  const calendarEvents = (state.campaignWorkspace.calendarEvents ?? []).filter((event) => {
+    const startsAt = new Date(event.starts_at);
+    if (Number.isNaN(startsAt.getTime())) return false;
+    if (selectedCampaignId !== 'all' && event.campaign_id !== selectedCampaignId) return false;
+    if (state.campaignWorkspace.calendarFilters.platform !== 'all' && event.platform !== state.campaignWorkspace.calendarFilters.platform) return false;
+    if (state.campaignWorkspace.calendarFilters.status !== 'all' && event.status !== state.campaignWorkspace.calendarFilters.status) return false;
+    return startsAt >= calendarRange.start && startsAt <= calendarRange.end;
+  });
+  const evergreenRules = (state.campaignWorkspace.evergreenRules ?? []).filter((rule) => (
+    selectedCampaignId === 'all' ? true : rule.campaign_id === selectedCampaignId
+  ));
 
   return `
     <section class="card">
@@ -825,6 +888,149 @@ const StudioView = () => {
       <pre>${state.monitor.selectedDetail ? JSON.stringify(state.monitor.selectedDetail, null, 2) : 'Noch kein Job gewählt.'}</pre>
       <p id="studio-status" class="muted"></p>
     </section>
+
+    <section class="card">
+      <h3>Kampagnen-UI: one_off/series + Cadence + Plattformmix</h3>
+      <div class="grid">
+        <label>Kampagne
+          <select id="campaign-workspace-select">
+            <option value="all">Alle Kampagnen</option>
+            ${campaigns.map((campaign) => `<option value="${campaign.id}" ${selectedCampaignId === campaign.id ? 'selected' : ''}>${escapeHtml(campaign.name)}</option>`).join('')}
+          </select>
+        </label>
+        <label>Neue Kampagne
+          <input id="campaign-create-name" placeholder="Q3 Awareness Push" />
+        </label>
+        <div style="display:flex;align-items:end;"><button id="campaign-create">Kampagne anlegen</button></div>
+      </div>
+      ${selectedCampaign ? `
+        <div class="grid">
+          <label>Name <input id="campaign-name" value="${escapeHtml(selectedCampaign.name ?? '')}" /></label>
+          <label>Typ
+            <select id="campaign-type">
+              ${['one_off', 'series'].map((type) => `<option value="${type}" ${selectedCampaign.campaign_type === type ? 'selected' : ''}>${type}</option>`).join('')}
+            </select>
+          </label>
+          <label>Objective <input id="campaign-objective" value="${escapeHtml(selectedCampaign.objective ?? '')}" placeholder="Awareness / Leads / Sales" /></label>
+          <label>CTA-Ziel <input id="campaign-cta-goal" value="${escapeHtml(selectedCampaign.cta_goal ?? '')}" placeholder="Terminbuchung" /></label>
+          <label>Zeitraum Start <input id="campaign-period-start" type="datetime-local" value="${isoDateInputValue(selectedCampaign.period_starts_at)}" /></label>
+          <label>Zeitraum Ende <input id="campaign-period-end" type="datetime-local" value="${isoDateInputValue(selectedCampaign.period_ends_at)}" /></label>
+        </div>
+        <label>Summary <textarea id="campaign-summary" rows="2">${escapeHtml(selectedCampaign.summary ?? '')}</textarea></label>
+        <h4>Cadence-Definition</h4>
+        <div class="grid">
+          <label>Intervall
+            <input id="campaign-cadence-interval" type="number" min="1" value="${Number(cadence.interval ?? 1)}" />
+          </label>
+          <label>Einheit
+            <select id="campaign-cadence-unit">
+              ${['day', 'week', 'month'].map((unit) => `<option value="${unit}" ${cadence.unit === unit ? 'selected' : ''}>${unit}</option>`).join('')}
+            </select>
+          </label>
+          <label>Wochentage (0-6 CSV)
+            <input id="campaign-cadence-weekdays" value="${parseNumericArray(cadence.weekdays, []).join(',')}" placeholder="1,3,5" />
+          </label>
+          <label>Times (HH:mm CSV)
+            <input id="campaign-cadence-times" value="${parseStringArray(cadence.times, []).join(',')}" placeholder="09:00,15:00" />
+          </label>
+        </div>
+        <h4>Plattformmix</h4>
+        <div class="inline-actions">
+          ${['linkedin', 'instagram', 'x', 'threads', 'youtube'].map((platform) => `
+            <label><input type="checkbox" data-platform-mix="${platform}" ${activePlatformMix.includes(platform) ? 'checked' : ''}/> ${platform}</label>
+          `).join('')}
+        </div>
+        <h4>Series-Regel</h4>
+        <div class="grid">
+          <label>Allowed weekdays CSV <input id="series-weekdays" value="${parseNumericArray(selectedSeriesRule?.allowed_weekdays, [1, 2, 3, 4, 5]).join(',')}" /></label>
+          <label>Allowed times CSV <input id="series-times" value="${parseStringArray(selectedSeriesRule?.allowed_times, ['09:00']).join(',')}" /></label>
+          <label>Timezone <input id="series-timezone" value="${escapeHtml(selectedSeriesRule?.timezone ?? 'UTC')}" /></label>
+        </div>
+        <div class="inline-actions">
+          <button id="campaign-save">Kampagne speichern</button>
+          <button id="series-save">Series-Regel speichern</button>
+        </div>
+      ` : '<p class="muted">Wähle eine Kampagne, um Felder zu bearbeiten.</p>'}
+    </section>
+
+    <section class="card">
+      <h3>Kalender (Monat/Woche/Tag) + Filter + Terminverschiebung + Konfliktwarnungen</h3>
+      <div class="grid">
+        <label>Ansicht
+          <select id="calendar-view">
+            ${['month', 'week', 'day'].map((view) => `<option value="${view}" ${state.campaignWorkspace.calendarView === view ? 'selected' : ''}>${view}</option>`).join('')}
+          </select>
+        </label>
+        <label>Ankerdatum <input id="calendar-anchor-date" type="date" value="${state.campaignWorkspace.calendarAnchorDate}" /></label>
+        <label>Plattform-Filter
+          <select id="calendar-filter-platform">
+            <option value="all">all</option>
+            ${['linkedin', 'instagram', 'x', 'threads', 'youtube'].map((platform) => `<option value="${platform}" ${state.campaignWorkspace.calendarFilters.platform === platform ? 'selected' : ''}>${platform}</option>`).join('')}
+          </select>
+        </label>
+        <label>Status-Filter
+          <select id="calendar-filter-status">
+            <option value="all">all</option>
+            ${['scheduled', 'rescheduled', 'cancelled', 'published'].map((eventStatus) => `<option value="${eventStatus}" ${state.campaignWorkspace.calendarFilters.status === eventStatus ? 'selected' : ''}>${eventStatus}</option>`).join('')}
+          </select>
+        </label>
+      </div>
+      ${calendarEvents.map((event) => `
+        <div class="list-item ${Array.isArray(event.conflict_flags) && event.conflict_flags.length ? 'calendar-conflict' : ''}">
+          <strong>${new Date(event.starts_at).toLocaleString()}</strong> • ${event.platform} ${statusPill(event.status)}
+          <div class="muted">Event: <code>${event.id}</code> • Post: <code>${event.post_id}</code></div>
+          <div class="inline-actions">
+            <input type="datetime-local" data-reschedule-at="${event.id}" value="${isoDateInputValue(event.starts_at)}" />
+            <button data-reschedule-event="${event.id}" data-reschedule-post="${event.post_id}" data-reschedule-platform="${event.platform}" data-reschedule-campaign="${event.campaign_id ?? ''}">Termin verschieben</button>
+          </div>
+          ${Array.isArray(event.conflict_flags) && event.conflict_flags.length ? `<div class="danger">Konflikte: ${event.conflict_flags.map((flag) => `<code>${escapeHtml(String(flag))}</code>`).join(' ')}</div>` : '<div class="muted">Keine Konflikte.</div>'}
+        </div>
+      `).join('') || '<p class="muted">Keine Events im gewählten Zeitfenster.</p>'}
+    </section>
+
+    <section class="card">
+      <h3>Bulk-Generator / Bulk-Scheduler</h3>
+      <div class="grid">
+        <label>Requested Count <input id="bulk-generation-count" type="number" min="1" max="500" value="10" /></label>
+        <label>Generation Brief <input id="bulk-generation-brief" placeholder="10 Varianten für Webinar-Serie" /></label>
+        <label>Optionen (JSON) <input id="bulk-generation-options" value='{"platforms":["linkedin","x"]}' /></label>
+      </div>
+      <button id="bulk-generation-create">Bulk-Generator-Job anlegen</button>
+      <div class="grid" style="margin-top:0.75rem;">
+        <label>Window Start <input id="bulk-scheduler-start" type="datetime-local" /></label>
+        <label>Window End <input id="bulk-scheduler-end" type="datetime-local" /></label>
+        <label>Plattform <input id="bulk-scheduler-platform" value="linkedin" /></label>
+        <label>Max/Tag <input id="bulk-scheduler-max-per-day" type="number" min="1" value="3" /></label>
+        <label>Timezone <input id="bulk-scheduler-timezone" value="UTC" /></label>
+        <label>Optionen (JSON) <input id="bulk-scheduler-options" value='{"respect_conflicts":true}' /></label>
+      </div>
+      <button id="bulk-scheduler-create">Bulk-Scheduler-Job anlegen</button>
+      <h4>Zuletzt erzeugte Jobs</h4>
+      ${(state.campaignWorkspace.bulkGenerationJobs ?? []).slice(0, 5).map((job) => `<div class="muted">Generation: ${job.requested_count} • ${job.status} • ${new Date(job.created_at).toLocaleString()}</div>`).join('')}
+      ${(state.campaignWorkspace.bulkSchedulerJobs ?? []).slice(0, 5).map((job) => `<div class="muted">Scheduler: ${job.platform ?? 'all'} ${job.status} • ${new Date(job.created_at).toLocaleString()}</div>`).join('')}
+    </section>
+
+    <section class="card">
+      <h3>Evergreen-Regelverwaltung (Persistenz)</h3>
+      <div class="grid">
+        <label>Plattform <input id="evergreen-platform" value="linkedin" /></label>
+        <label>Mindestabstand Tage <input id="evergreen-spacing" type="number" min="1" value="14" /></label>
+        <label>Variantenwechsel
+          <select id="evergreen-rotation">
+            ${['round_robin', 'least_recent', 'random'].map((mode) => `<option value="${mode}">${mode}</option>`).join('')}
+          </select>
+        </label>
+        <label>KPI-Metrik <input id="evergreen-kpi-metric" placeholder="ctr" /></label>
+        <label>KPI-Schwelle <input id="evergreen-kpi-threshold" type="number" step="0.01" placeholder="1.2" /></label>
+      </div>
+      <button id="evergreen-save">Evergreen-Regel speichern</button>
+      ${evergreenRules.map((rule) => `
+        <div class="list-item">
+          <strong>${rule.platform}</strong> • Abstand ${rule.min_spacing_days} Tage • Rotation ${rule.variant_rotation}
+          <div class="muted">KPI: ${rule.min_kpi_metric ?? '—'} ≥ ${rule.min_kpi_threshold ?? '—'} • Status: ${rule.status}</div>
+        </div>
+      `).join('') || '<p class="muted">Keine Evergreen-Regeln für den Filter.</p>'}
+    </section>
   `;
 };
 
@@ -899,6 +1105,62 @@ const loadBufferState = async () => {
     .order('updated_at', { ascending: false })
     .limit(20);
   state.monitor.deadLetters.generation = generationDead ?? [];
+};
+
+const loadCampaignWorkspace = async () => {
+  const { data: campaigns, error: campaignError } = await supabase
+    .from('campaigns')
+    .select('id, name, summary, campaign_type, objective, period_starts_at, period_ends_at, platform_mix, cadence, cta_goal, updated_at')
+    .is('deleted_at', null)
+    .order('updated_at', { ascending: false })
+    .limit(200);
+  if (campaignError) throw campaignError;
+
+  const { data: seriesRules } = await supabase
+    .from('campaign_series_rules')
+    .select('id, campaign_id, allowed_weekdays, allowed_times, topic_rotation, platform_frequencies, timezone, status')
+    .is('deleted_at', null)
+    .order('updated_at', { ascending: false })
+    .limit(200);
+
+  const { data: evergreenRules } = await supabase
+    .from('evergreen_repost_rules')
+    .select('id, campaign_id, platform, min_spacing_days, variant_rotation, min_kpi_metric, min_kpi_threshold, status')
+    .is('deleted_at', null)
+    .order('updated_at', { ascending: false })
+    .limit(400);
+
+  const { data: calendarEvents } = await supabase
+    .from('calendar_events')
+    .select('id, post_id, campaign_id, platform, starts_at, ends_at, timezone, conflict_flags, status')
+    .is('deleted_at', null)
+    .order('starts_at', { ascending: true })
+    .limit(500);
+
+  const { data: bulkGenerationJobs } = await supabase
+    .from('bulk_generation_jobs')
+    .select('id, campaign_id, requested_count, generation_brief, options, status, created_at')
+    .is('deleted_at', null)
+    .order('created_at', { ascending: false })
+    .limit(100);
+
+  const { data: bulkSchedulerJobs } = await supabase
+    .from('bulk_scheduler_jobs')
+    .select('id, campaign_id, platform, window_start, window_end, timezone, max_per_day, options, status, created_at')
+    .is('deleted_at', null)
+    .order('created_at', { ascending: false })
+    .limit(100);
+
+  state.campaignWorkspace.campaigns = campaigns ?? [];
+  state.campaignWorkspace.seriesRules = seriesRules ?? [];
+  state.campaignWorkspace.evergreenRules = evergreenRules ?? [];
+  state.campaignWorkspace.calendarEvents = calendarEvents ?? [];
+  state.campaignWorkspace.bulkGenerationJobs = bulkGenerationJobs ?? [];
+  state.campaignWorkspace.bulkSchedulerJobs = bulkSchedulerJobs ?? [];
+  const existingCampaignIds = new Set((campaigns ?? []).map((campaign) => campaign.id));
+  if (state.campaignWorkspace.selectedCampaignId !== 'all' && !existingCampaignIds.has(state.campaignWorkspace.selectedCampaignId)) {
+    state.campaignWorkspace.selectedCampaignId = 'all';
+  }
 };
 
 const loadMediaAssets = async (postId = null) => {
@@ -1069,6 +1331,7 @@ const bindStudioEvents = () => {
     const session = await getSession();
     await loadPdfWorkspace(session);
     await loadBufferState();
+    await loadCampaignWorkspace();
     await loadMediaAssets(state.selectedId);
     renderLayout(StudioView());
     if (statusMessage) {
@@ -1194,6 +1457,206 @@ const bindStudioEvents = () => {
       renderLayout(StudioView());
       bindStudioEvents();
     });
+  });
+
+  document.getElementById('campaign-workspace-select')?.addEventListener('change', (event) => {
+    state.campaignWorkspace.selectedCampaignId = event.target.value;
+    renderLayout(StudioView());
+    bindStudioEvents();
+  });
+
+  document.getElementById('campaign-create')?.addEventListener('click', async () => {
+    const name = document.getElementById('campaign-create-name')?.value?.trim();
+    if (!name) return setStatus('Bitte einen Kampagnennamen eingeben.');
+    try {
+      const session = await getSession();
+      if (!session?.user?.id) return setStatus('Nicht eingeloggt: Kampagne kann nicht erstellt werden.');
+      const { data, error } = await supabase.from('campaigns').insert({
+        name,
+        campaign_type: 'one_off',
+        platform_mix: [],
+        cadence: { interval: 1, unit: 'week', weekdays: [1, 3, 5], times: ['09:00'] },
+        created_by: session.user.id,
+        updated_by: session.user.id,
+      }).select('id').single();
+      if (error) throw error;
+      state.campaignWorkspace.selectedCampaignId = data.id;
+      await refreshStudio('Kampagne angelegt.');
+    } catch (error) {
+      setStatus(`Kampagnenanlage fehlgeschlagen: ${error.message}`);
+    }
+  });
+
+  document.getElementById('campaign-save')?.addEventListener('click', async () => {
+    const campaignId = state.campaignWorkspace.selectedCampaignId;
+    if (!isUuid(campaignId)) return setStatus('Bitte eine konkrete Kampagne auswählen.');
+    try {
+      const session = await getSession();
+      if (!session?.user?.id) return setStatus('Nicht eingeloggt: Speichern nicht möglich.');
+      const platformMix = Array.from(document.querySelectorAll('[data-platform-mix]:checked')).map((el) => el.dataset.platformMix);
+      const cadencePayload = {
+        interval: Number(document.getElementById('campaign-cadence-interval')?.value ?? 1),
+        unit: document.getElementById('campaign-cadence-unit')?.value ?? 'week',
+        weekdays: parseNumericArray(document.getElementById('campaign-cadence-weekdays')?.value, []),
+        times: parseStringArray(document.getElementById('campaign-cadence-times')?.value, []),
+      };
+      const payload = {
+        name: document.getElementById('campaign-name')?.value?.trim() ?? 'Unbenannt',
+        summary: document.getElementById('campaign-summary')?.value?.trim() ?? null,
+        campaign_type: document.getElementById('campaign-type')?.value ?? 'one_off',
+        objective: document.getElementById('campaign-objective')?.value?.trim() ?? null,
+        cta_goal: document.getElementById('campaign-cta-goal')?.value?.trim() ?? null,
+        period_starts_at: document.getElementById('campaign-period-start')?.value || null,
+        period_ends_at: document.getElementById('campaign-period-end')?.value || null,
+        platform_mix: platformMix,
+        cadence: cadencePayload,
+        updated_by: session.user.id,
+      };
+      const { error } = await supabase.from('campaigns').update(payload).eq('id', campaignId);
+      if (error) throw error;
+      await refreshStudio('Kampagne inkl. Cadence/Plattformmix gespeichert.');
+    } catch (error) {
+      setStatus(`Kampagne speichern fehlgeschlagen: ${error.message}`);
+    }
+  });
+
+  document.getElementById('series-save')?.addEventListener('click', async () => {
+    const campaignId = state.campaignWorkspace.selectedCampaignId;
+    if (!isUuid(campaignId)) return setStatus('Bitte eine konkrete Kampagne auswählen.');
+    try {
+      const session = await getSession();
+      if (!session?.user?.id) return setStatus('Nicht eingeloggt: Series-Regel kann nicht gespeichert werden.');
+      const payload = {
+        campaign_id: campaignId,
+        allowed_weekdays: parseNumericArray(document.getElementById('series-weekdays')?.value, [1, 2, 3, 4, 5]),
+        allowed_times: parseStringArray(document.getElementById('series-times')?.value, ['09:00']),
+        timezone: document.getElementById('series-timezone')?.value?.trim() ?? 'UTC',
+        topic_rotation: [],
+        platform_frequencies: {},
+        updated_by: session.user.id,
+        created_by: session.user.id,
+      };
+      const { error } = await supabase.from('campaign_series_rules').upsert(payload, { onConflict: 'campaign_id' });
+      if (error) throw error;
+      await refreshStudio('Series-Regel gespeichert.');
+    } catch (error) {
+      setStatus(`Series-Regel speichern fehlgeschlagen: ${error.message}`);
+    }
+  });
+
+  document.getElementById('calendar-view')?.addEventListener('change', (event) => {
+    state.campaignWorkspace.calendarView = event.target.value;
+    renderLayout(StudioView());
+    bindStudioEvents();
+  });
+  document.getElementById('calendar-anchor-date')?.addEventListener('change', (event) => {
+    state.campaignWorkspace.calendarAnchorDate = event.target.value;
+    renderLayout(StudioView());
+    bindStudioEvents();
+  });
+  document.getElementById('calendar-filter-platform')?.addEventListener('change', (event) => {
+    state.campaignWorkspace.calendarFilters.platform = event.target.value;
+    renderLayout(StudioView());
+    bindStudioEvents();
+  });
+  document.getElementById('calendar-filter-status')?.addEventListener('change', (event) => {
+    state.campaignWorkspace.calendarFilters.status = event.target.value;
+    renderLayout(StudioView());
+    bindStudioEvents();
+  });
+
+  document.querySelectorAll('[data-reschedule-event]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const eventId = button.dataset.rescheduleEvent;
+      const startsAt = document.querySelector(`[data-reschedule-at="${eventId}"]`)?.value;
+      const postId = button.dataset.reschedulePost;
+      const platform = button.dataset.reschedulePlatform;
+      const campaignId = button.dataset.rescheduleCampaign || null;
+      if (!startsAt || !isUuid(postId)) return setStatus('Ungültige Terminverschiebung.');
+      const { data, error } = await supabase.rpc('schedule_calendar_event', {
+        p_post_id: postId,
+        p_campaign_id: isUuid(campaignId) ? campaignId : null,
+        p_platform: platform,
+        p_starts_at: new Date(startsAt).toISOString(),
+      });
+      if (error) return setStatus(`Terminverschiebung fehlgeschlagen: ${error.message}`);
+      if (Array.isArray(data?.conflict_flags) && data.conflict_flags.length) {
+        setStatus(`Termin verschoben mit Konflikten: ${data.conflict_flags.join(', ')}`);
+      } else {
+        setStatus('Termin erfolgreich verschoben.');
+      }
+      await refreshStudio();
+    });
+  });
+
+  document.getElementById('bulk-generation-create')?.addEventListener('click', async () => {
+    try {
+      const session = await getSession();
+      if (!session?.user?.id) return setStatus('Nicht eingeloggt: Bulk-Generator kann nicht erstellt werden.');
+      const options = JSON.parse(document.getElementById('bulk-generation-options')?.value || '{}');
+      const { error } = await supabase.from('bulk_generation_jobs').insert({
+        campaign_id: isUuid(state.campaignWorkspace.selectedCampaignId) ? state.campaignWorkspace.selectedCampaignId : null,
+        requested_count: Number(document.getElementById('bulk-generation-count')?.value ?? 10),
+        generation_brief: document.getElementById('bulk-generation-brief')?.value?.trim() ?? null,
+        options,
+        status: 'queued',
+        created_by: session.user.id,
+        updated_by: session.user.id,
+      });
+      if (error) throw error;
+      await refreshStudio('Bulk-Generator-Job angelegt.');
+    } catch (error) {
+      setStatus(`Bulk-Generator fehlgeschlagen: ${error.message}`);
+    }
+  });
+
+  document.getElementById('bulk-scheduler-create')?.addEventListener('click', async () => {
+    try {
+      const session = await getSession();
+      if (!session?.user?.id) return setStatus('Nicht eingeloggt: Bulk-Scheduler kann nicht erstellt werden.');
+      const options = JSON.parse(document.getElementById('bulk-scheduler-options')?.value || '{}');
+      const { error } = await supabase.from('bulk_scheduler_jobs').insert({
+        campaign_id: isUuid(state.campaignWorkspace.selectedCampaignId) ? state.campaignWorkspace.selectedCampaignId : null,
+        platform: document.getElementById('bulk-scheduler-platform')?.value?.trim() || null,
+        window_start: new Date(document.getElementById('bulk-scheduler-start')?.value).toISOString(),
+        window_end: new Date(document.getElementById('bulk-scheduler-end')?.value).toISOString(),
+        timezone: document.getElementById('bulk-scheduler-timezone')?.value?.trim() || 'UTC',
+        max_per_day: Number(document.getElementById('bulk-scheduler-max-per-day')?.value ?? 3),
+        options,
+        status: 'queued',
+        created_by: session.user.id,
+        updated_by: session.user.id,
+      });
+      if (error) throw error;
+      await refreshStudio('Bulk-Scheduler-Job angelegt.');
+    } catch (error) {
+      setStatus(`Bulk-Scheduler fehlgeschlagen: ${error.message}`);
+    }
+  });
+
+  document.getElementById('evergreen-save')?.addEventListener('click', async () => {
+    const campaignId = state.campaignWorkspace.selectedCampaignId;
+    if (!isUuid(campaignId)) return setStatus('Bitte zuerst eine Kampagne für Evergreen-Regeln wählen.');
+    try {
+      const session = await getSession();
+      if (!session?.user?.id) return setStatus('Nicht eingeloggt: Evergreen-Regel kann nicht gespeichert werden.');
+      const payload = {
+        campaign_id: campaignId,
+        platform: document.getElementById('evergreen-platform')?.value?.trim() ?? 'linkedin',
+        min_spacing_days: Number(document.getElementById('evergreen-spacing')?.value ?? 14),
+        variant_rotation: document.getElementById('evergreen-rotation')?.value ?? 'round_robin',
+        min_kpi_metric: document.getElementById('evergreen-kpi-metric')?.value?.trim() || null,
+        min_kpi_threshold: document.getElementById('evergreen-kpi-threshold')?.value ? Number(document.getElementById('evergreen-kpi-threshold').value) : null,
+        status: 'active',
+        created_by: session.user.id,
+        updated_by: session.user.id,
+      };
+      const { error } = await supabase.from('evergreen_repost_rules').upsert(payload, { onConflict: 'campaign_id,platform' });
+      if (error) throw error;
+      await refreshStudio('Evergreen-Regel gespeichert.');
+    } catch (error) {
+      setStatus(`Evergreen-Regel speichern fehlgeschlagen: ${error.message}`);
+    }
   });
 
   document.querySelectorAll('[data-user-role-save]').forEach((button) => {
@@ -1978,6 +2441,11 @@ const renderView = async (viewName) => {
       await loadPdfWorkspace(session);
     } catch (error) {
       logger.warn('load_pdf_workspace_failed', { message: error.message });
+    }
+    try {
+      await loadCampaignWorkspace();
+    } catch (error) {
+      logger.warn('load_campaign_workspace_failed', { message: error.message });
     }
     await loadBufferState();
     try {
