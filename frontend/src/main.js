@@ -200,7 +200,7 @@ const getPreApprovalChecks = (post) => {
 
 const hasRolePermission = (action) => {
   if (state.role === 'owner') return true;
-  const editorPermissions = ['edit', 'submit_review', 'regenerate_hashtags', 'select_winner'];
+  const editorPermissions = ['edit', 'submit_review', 'regenerate_hashtags', 'select_winner', 'archive'];
   return editorPermissions.includes(action);
 };
 
@@ -301,7 +301,7 @@ const StudioView = () => {
           <button id="create-post">Neuer Post</button>
         </div>
         <p class="muted">Editor mit Varianten A/B/C, Zeichenzähler, CTA-/Hook-Hinweisen und Freigabechecks.</p>
-        ${visiblePosts.map((post) => `
+        ${visiblePosts.filter((post) => post.status !== 'archived').map((post) => `
           <div class="list-item">
             <strong>${post.title}</strong> ${statusPill(post.status)}
             <div class="muted">${post.section} • ${post.book} • ${post.campaign} • ${post.platform} • ${post.language}</div>
