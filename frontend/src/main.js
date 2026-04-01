@@ -56,6 +56,12 @@ const state = {
     deadLetters: { publish: [], generation: [] },
     selectedDetail: null,
   },
+  pdfWorkspace: {
+    books: [],
+    documents: [],
+    insights: [],
+    selectedBookId: null,
+  },
 
   posts: [
     {
@@ -307,6 +313,17 @@ const getFallbackSelectedId = (removedId = null) => {
 };
 
 const statusPill = (status) => `<span class="status-pill">${status}</span>`;
+const escapeHtml = (value = '') => value
+  .replaceAll('&', '&amp;')
+  .replaceAll('<', '&lt;')
+  .replaceAll('>', '&gt;')
+  .replaceAll('"', '&quot;')
+  .replaceAll("'", '&#39;');
+
+const renderInsightList = (items) => {
+  if (!Array.isArray(items) || !items.length) return '<li class="muted">Keine Einträge.</li>';
+  return items.map((item) => `<li>${escapeHtml(String(item))}</li>`).join('');
+};
 
 const LoginView = () => `
   <section class="card">
@@ -376,8 +393,75 @@ const StudioView = () => {
   const generationDeadLetters = state.monitor.deadLetters.generation ?? [];
   const roleUsers = state.roleManagement.users ?? [];
   const roleAuditLogsByUser = state.roleManagement.auditLogsByUser ?? {};
+  const books = state.pdfWorkspace.books ?? [];
+  const documents = state.pdfWorkspace.documents ?? [];
+  const insights = state.pdfWorkspace.insights ?? [];
+  const selectedBookId = state.pdfWorkspace.selectedBookId;
+  const selectedBook = books.find((book) => book.id === selectedBookId) ?? books[0] ?? null;
+  const bookDocuments = selectedBook ? documents.filter((document) => document.book_id === selectedBook.id) : [];
+  const insightsByDocumentId = insights.reduce((acc, insight) => {
+    if (!insight.document_id) return acc;
+    acc[insight.document_id] = insight;
+    return acc;
+  }, {});
 
   return `
+    <section class="card">
+      <h3>Buchanlage & PDF-Analyse</h3>
+      <form id="book-create-form" class="grid">
+        <label>Titel
+          <input id="book-title" required placeholder="Buchtitel" />
+        </label>
+        <label>Beschreibung
+          <input id="book-description" placeholder="Kurze Beschreibung" />
+        </label>
+        <div style="display:flex;align-items:end;">
+          <button type="submit">Buch anlegen</button>
+        </div>
+      </form>
+      <div class="inline-actions">
+        <label>Buch auswählen
+          <select id="book-select">
+            ${books.map((book) => `<option value="${book.id}" ${selectedBook?.id === book.id ? 'selected' : ''}>${escapeHtml(book.title ?? 'Ohne Titel')}</option>`).join('')}
+          </select>
+        </label>
+      </div>
+      ${!selectedBook ? '<p class="muted">Lege zuerst ein Buch an, um PDFs hochzuladen.</p>' : `
+        <form id="pdf-upload-form" class="inline-actions">
+          <input id="pdf-file" type="file" accept="application/pdf" required />
+          <button type="submit">PDF in Storage-Bucket hochladen</button>
+        </form>
+      `}
+      <h4>Dokumentstatus</h4>
+      ${bookDocuments.map((document) => {
+    const insight = insightsByDocumentId[document.id];
+    return `
+          <div class="list-item">
+            <div><strong>${escapeHtml(document.file_name ?? 'Unbekanntes Dokument')}</strong> ${statusPill(document.parse_status ?? 'uploaded')}</div>
+            <div class="muted">Status: <code>${document.parse_status ?? 'uploaded'}</code> • Hochgeladen: ${new Date(document.created_at).toLocaleString()}</div>
+            ${document.parse_error ? `<div class="danger">Parse-Fehler: ${escapeHtml(document.parse_error)}</div>` : ''}
+            <div class="inline-actions">
+              <button data-start-analysis="${document.id}">Analyse starten</button>
+              <button data-reanalyze="${document.id}">Neu analysieren</button>
+            </div>
+            ${insight ? `
+              <div>
+                <h5>book_insights</h5>
+                <p><strong>Short Summary:</strong> ${escapeHtml(insight.summary_short ?? '—')}</p>
+                <p><strong>Long Summary:</strong> ${escapeHtml(insight.summary_long ?? insight.content ?? '—')}</p>
+                <strong>Key Topics</strong>
+                <ul>${renderInsightList(insight.key_topics)}</ul>
+                <strong>Quotes</strong>
+                <ul>${renderInsightList(insight.quote_candidates)}</ul>
+                <strong>Content Seeds</strong>
+                <ul>${renderInsightList(insight.content_seeds)}</ul>
+              </div>
+            ` : '<p class="muted">Noch keine Insights vorhanden.</p>'}
+          </div>
+        `;
+  }).join('') || '<p class="muted">Keine Dokumente für dieses Buch.</p>'}
+    </section>
+
     <section class="card">
       <h2>Frontend Arbeitsbereiche</h2>
       <div class="toolbar">
@@ -594,6 +678,40 @@ const StudioView = () => {
 };
 
 
+const loadPdfWorkspace = async (session) => {
+  const { data: books, error: booksError } = await supabase
+    .from('books')
+    .select('id, title, description, status, updated_at')
+    .is('deleted_at', null)
+    .order('updated_at', { ascending: false })
+    .limit(100);
+  if (booksError) throw new Error(`Bücher konnten nicht geladen werden: ${booksError.message}`);
+
+  const { data: documents, error: docsError } = await supabase
+    .from('book_documents')
+    .select('id, book_id, file_name, source_uri, parse_status, parse_error, created_at, updated_at, parsed_at, document_metadata')
+    .is('deleted_at', null)
+    .order('updated_at', { ascending: false })
+    .limit(200);
+  if (docsError) throw new Error(`Dokumente konnten nicht geladen werden: ${docsError.message}`);
+
+  const { data: insights, error: insightsError } = await supabase
+    .from('book_insights')
+    .select('id, book_id, document_id, content, summary_short, summary_long, key_topics, quote_candidates, content_seeds, updated_at')
+    .is('deleted_at', null)
+    .order('updated_at', { ascending: false })
+    .limit(200);
+  if (insightsError) throw new Error(`Insights konnten nicht geladen werden: ${insightsError.message}`);
+
+  state.pdfWorkspace.books = books ?? [];
+  state.pdfWorkspace.documents = documents ?? [];
+  state.pdfWorkspace.insights = insights ?? [];
+  if (!state.pdfWorkspace.selectedBookId || !state.pdfWorkspace.books.some((book) => book.id === state.pdfWorkspace.selectedBookId)) {
+    state.pdfWorkspace.selectedBookId = state.pdfWorkspace.books[0]?.id ?? null;
+  }
+  state.pdfWorkspace.userId = session?.user?.id ?? null;
+};
+
 const loadBufferState = async () => {
   const { data: accounts } = await supabase.from('buffer_accounts').select('id, access_status, access_status, status').eq('status', 'active').order('updated_at', { ascending: false }).limit(1);
   state.buffer.accounts = accounts ?? [];
@@ -782,6 +900,105 @@ const bindStudioEvents = () => {
     if (el) el.textContent = msg;
   };
   const post = getPost();
+  const refreshStudio = async (statusMessage = null) => {
+    const session = await getSession();
+    await loadPdfWorkspace(session);
+    await loadBufferState();
+    renderLayout(StudioView());
+    if (statusMessage) {
+      const el = document.getElementById('studio-status');
+      if (el) el.textContent = statusMessage;
+    }
+    bindStudioEvents();
+  };
+
+  document.getElementById('book-create-form')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const title = document.getElementById('book-title')?.value?.trim();
+    const description = document.getElementById('book-description')?.value?.trim() ?? '';
+    if (!title) return setStatus('Bitte einen Buchtitel angeben.');
+    try {
+      const session = await getSession();
+      if (!session?.user?.id) return setStatus('Nicht eingeloggt: Buchanlage nicht möglich.');
+      const { data, error } = await supabase
+        .from('books')
+        .insert({
+          title,
+          description,
+          status: 'active',
+          created_by: session.user.id,
+          updated_by: session.user.id,
+        })
+        .select('id')
+        .single();
+      if (error) throw error;
+      state.pdfWorkspace.selectedBookId = data.id;
+      await refreshStudio(`Buch "${title}" wurde angelegt.`);
+    } catch (error) {
+      setStatus(`Buchanlage fehlgeschlagen: ${error.message}`);
+    }
+  });
+
+  document.getElementById('book-select')?.addEventListener('change', (event) => {
+    state.pdfWorkspace.selectedBookId = event.target.value;
+    renderLayout(StudioView());
+    bindStudioEvents();
+  });
+
+  document.getElementById('pdf-upload-form')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const selectedBookId = state.pdfWorkspace.selectedBookId;
+    const fileInput = document.getElementById('pdf-file');
+    const file = fileInput?.files?.[0];
+    if (!selectedBookId) return setStatus('Bitte zuerst ein Buch auswählen.');
+    if (!file) return setStatus('Bitte eine PDF-Datei auswählen.');
+    try {
+      const session = await getSession();
+      if (!session?.user?.id) return setStatus('Nicht eingeloggt: Upload nicht möglich.');
+      const sanitizedFileName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, '_');
+      const objectPath = `${selectedBookId}/${Date.now()}-${sanitizedFileName}`;
+      const { error: uploadError } = await supabase.storage.from('book-pdfs').upload(objectPath, file, { contentType: file.type || 'application/pdf' });
+      if (uploadError) throw new Error(`Storage-Upload fehlgeschlagen (${uploadError.message}).`);
+      const { error: docError } = await supabase.from('book_documents').insert({
+        book_id: selectedBookId,
+        source_type: 'upload',
+        source_uri: `book-pdfs/${objectPath}`,
+        file_name: file.name,
+        mime_type: file.type || 'application/pdf',
+        parse_status: 'uploaded',
+        created_by: session.user.id,
+        updated_by: session.user.id,
+      });
+      if (docError) throw docError;
+      await refreshStudio(`PDF "${file.name}" wurde hochgeladen.`);
+    } catch (error) {
+      setStatus(`PDF-Upload fehlgeschlagen: ${error.message}`);
+    }
+  });
+
+  document.querySelectorAll('[data-start-analysis]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const documentId = button.dataset.startAnalysis;
+      if (!documentId) return;
+      const { data, error } = await supabase.functions.invoke('start-pdf-analysis', {
+        body: { document_id: documentId, force: false },
+      });
+      if (error || data?.ok === false) return setStatus(`Analyse starten fehlgeschlagen: ${error?.message ?? data?.error ?? 'unknown_error'}`);
+      await refreshStudio('Analyse wurde gestartet.');
+    });
+  });
+
+  document.querySelectorAll('[data-reanalyze]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const documentId = button.dataset.reanalyze;
+      if (!documentId) return;
+      const { data, error } = await supabase.functions.invoke('start-pdf-analysis', {
+        body: { document_id: documentId, force: true },
+      });
+      if (error || data?.ok === false) return setStatus(`Neu analysieren fehlgeschlagen: ${error?.message ?? data?.error ?? 'unknown_error'}`);
+      await refreshStudio('Neu-Analyse wurde gestartet.');
+    });
+  });
 
   document.querySelectorAll('[data-filter]').forEach((el) => {
     el.addEventListener('change', (e) => {
@@ -1276,6 +1493,11 @@ const renderView = async (viewName) => {
       await loadRoleManagement();
     } catch (error) {
       logger.warn('load_role_management_failed', { message: error.message });
+    }
+    try {
+      await loadPdfWorkspace(session);
+    } catch (error) {
+      logger.warn('load_pdf_workspace_failed', { message: error.message });
     }
     await loadBufferState();
     renderLayout(StudioView());
