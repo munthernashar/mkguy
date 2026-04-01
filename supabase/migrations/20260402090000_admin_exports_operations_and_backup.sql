@@ -240,7 +240,7 @@ as $$
       c.starts_at,
       c.ends_at,
       c.created_at,
-      max(p.book_id) as book_id,
+      min(p.book_id::text) as book_id,
       count(distinct p.id) as post_count,
       count(distinct case when p.workflow_status = 'published' then p.id end) as published_post_count,
       string_agg(distinct coalesce(pa.platform, bp.service), '|' order by coalesce(pa.platform, bp.service)) as platforms
