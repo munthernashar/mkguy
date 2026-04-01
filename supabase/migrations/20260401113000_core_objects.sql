@@ -11,9 +11,9 @@ alter table public.user_roles
   add constraint user_roles_role_check
   check (role in ('owner', 'editor', 'viewer'));
 
-drop type if exists public.app_role;
+drop function if exists public.current_app_role();
 
-create or replace function public.current_app_role()
+create function public.current_app_role()
 returns text
 language sql
 stable
@@ -22,6 +22,8 @@ as $$
   from public.user_roles
   where user_id = auth.uid();
 $$;
+
+drop type if exists public.app_role;
 
 -- Harden existing core tables with lifecycle and versioning fields.
 alter table public.books
