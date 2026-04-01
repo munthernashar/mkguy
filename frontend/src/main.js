@@ -88,6 +88,7 @@ const state = {
   roleManagement: {
     users: [],
     auditLogsByUser: {},
+    loadError: null,
   },
 
   buffer: {
@@ -1127,11 +1128,16 @@ const OpsView = () => {
   const exportFilters = state.adminWorkspace.exportFilters ?? {};
   const roleUsers = state.roleManagement.users ?? [];
   const roleAuditLogsByUser = state.roleManagement.auditLogsByUser ?? {};
+  const roleManagementLoadError = state.roleManagement.loadError;
   const authUserCount = roleUsers.length;
   const assignedRoleCount = roleUsers.filter((user) => Boolean(user.current_role)).length;
-  const roleManagementEmptyState = authUserCount === 0
-    ? '<p class="muted">Keine Auth-User gefunden.</p>'
-    : '<p class="muted">Auth-User vorhanden, aber noch keine Rollen zugewiesen.</p>';
+  const roleManagementStatusMessage = roleManagementLoadError
+    ? `<p class="muted">Fehler beim Laden: ${escapeHtml(roleManagementLoadError)}</p>`
+    : authUserCount === 0
+      ? '<p class="muted">Keine Auth-User gefunden.</p>'
+      : assignedRoleCount === 0
+        ? '<p class="muted">Auth-User gefunden, aber keine Rollen zugewiesen.</p>'
+        : `<p class="muted">Auth-User: <code>${authUserCount}</code> • Mit Rolle: <code>${assignedRoleCount}</code></p>`;
   const buildSection = (jobType) => {
     const jobs = state.monitor.deadLetters[jobType] ?? [];
     const filter = state.monitor.filters[jobType] ?? { errorCode: 'all', search: '' };
@@ -1226,7 +1232,7 @@ const OpsView = () => {
       <h3>Benutzer & Rollen</h3>
       <p class="muted">Nur Owner dürfen Rollen ändern. Änderungen werden über <code>set-user-role</code> ausgeführt.</p>
       ${state.currentRole !== 'owner' ? '<p class="muted">Keine Berechtigung zur Rollenverwaltung.</p>' : ''}
-      ${state.currentRole === 'owner' ? `<p class="muted">Auth-User: <code>${authUserCount}</code> • Mit Rolle: <code>${assignedRoleCount}</code></p>` : ''}
+      ${state.currentRole === 'owner' ? roleManagementStatusMessage : ''}
       ${state.currentRole === 'owner' ? roleUsers.map((user) => {
         const label = [user.display_name, user.email].filter(Boolean).join(' • ') || user.user_id;
         const roleLabel = user.current_role ? `<code>${user.current_role}</code>` : '<span class="muted">keine Rolle</span>';
@@ -1249,7 +1255,7 @@ const OpsView = () => {
           </div>
         </div>
       `;
-      }).join('') || roleManagementEmptyState : ''}
+      }).join('') || '' : ''}
     </section>
     <section class="card">
       <h3>Admin Settings (Owner only)</h3>
@@ -1614,6 +1620,7 @@ const loadCurrentRole = async (session) => {
 const loadRoleManagement = async () => {
   state.roleManagement.users = [];
   state.roleManagement.auditLogsByUser = {};
+  state.roleManagement.loadError = null;
 
   if (state.currentRole !== 'owner') return;
 
@@ -1622,10 +1629,12 @@ const loadRoleManagement = async () => {
   });
   if (roleUsersError) {
     const rawMessage = String(roleUsersError.message ?? roleUsersError);
-    throw new Error(`Benutzerrollen konnten nicht geladen werden: ${rawMessage}`);
+    state.roleManagement.loadError = `Benutzerrollen konnten nicht geladen werden (${rawMessage})`;
+    return;
   }
   if (roleUsersData?.ok === false) {
-    throw new Error(`Benutzerrollen konnten nicht geladen werden: ${roleUsersData.error ?? 'operation_failed'}`);
+    state.roleManagement.loadError = `Benutzerrollen konnten nicht geladen werden (${roleUsersData.error ?? 'operation_failed'})`;
+    return;
   }
 
   const { data: auditLogs, error: logError } = await supabase
@@ -1635,7 +1644,9 @@ const loadRoleManagement = async () => {
     .in('action', ['role_assigned', 'role_changed', 'role_revoked'])
     .order('created_at', { ascending: false })
     .limit(500);
-  if (logError) throw new Error(`Änderungsverlauf konnte nicht geladen werden: ${logError.message}`);
+  if (logError) {
+    state.roleManagement.loadError = `Änderungsverlauf konnte nicht geladen werden (${logError.message})`;
+  }
 
   state.roleManagement.users = (roleUsersData?.users ?? []).map((entry) => ({
     user_id: entry.user_id,
