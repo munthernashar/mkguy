@@ -264,3 +264,38 @@ Diese Informationen werden in `publish_jobs.last_error_code`, `publish_jobs.last
 | other | ❌ | ❌ | ❌ | Nicht unterstützt |
 
 Nicht unterstützte Kombinationen werden im UI explizit markiert (z. B. `direct + media` oder `direct + scheduling`).
+
+## 13) Backup/Restore Governance (Admin/Ops)
+
+### Verantwortlichkeiten
+- **Incident Commander (IC):** priorisiert, entscheidet über Restore-Ziel (Staging-only vs. Prod), gibt Go/No-Go frei.
+- **DB-Operator (Ops):** führt `backup`/`restore-check` aus, dokumentiert Laufzeiten, Fehler und Artefakte.
+- **Applikations-Owner:** validiert fachliche Integrität (Posts, Publishing, KPI) nach Restore.
+- **Protokollant:** pflegt Ticket/Incident-Log mit Zeitlinie, Checks und Entscheidungen.
+
+### Operative Trigger (konkret)
+- Täglich 02:15 UTC: regulärer Dump.
+- Montag 03:00 UTC: Restore-Probe in Staging.
+- Zusätzlich ad hoc vor:
+  - RLS-/Policy-Änderungen,
+  - Migrationen an `posts/publish_jobs/post_metrics`,
+  - Bulk-Updates/Löschungen,
+  - Wartungsarbeiten mit erhöhtem Datenrisiko.
+
+### Aufbewahrung + Nachweis
+- Tägliche Dumps: 14 Tage.
+- Monatliche Snapshots: 6 Monate.
+- Jeder Lauf schreibt:
+  - Dump-Datei,
+  - SHA256-Datei,
+  - Manifest (UTC-Zeit, Kern-Rowcounts).
+
+### Notfallrestore unter Zeitdruck
+- Ziel-SLA: erste verifizierte Restore-Entscheidung ≤ 60 Minuten.
+- Mindestprüfungen vor Freigabe:
+  1. Tabellenanzahl plausibel.
+  2. Stichproben `posts/publish_jobs/post_metrics` plausibel.
+  3. RLS aktiv + Policies vorhanden.
+- Ohne diese drei Prüfungen kein Go-Live nach Restore.
+
+Referenz: detaillierter Ablauf in `docs/runbook.md` Abschnitt **3. Operativer Backup/Restore-Ablauf**.
