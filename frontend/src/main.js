@@ -642,8 +642,6 @@ const StudioView = () => {
   const text = selectedVariant?.text ?? '';
   const limits = PLATFORM_LIMITS[selected.platform] || PLATFORM_LIMITS.linkedin;
   const overLimit = text.length > limits.text;
-  const roleUsers = state.roleManagement.users ?? [];
-  const roleAuditLogsByUser = state.roleManagement.auditLogsByUser ?? {};
   const books = state.pdfWorkspace.books ?? [];
   const documents = state.pdfWorkspace.documents ?? [];
   const insights = state.pdfWorkspace.insights ?? [];
@@ -758,29 +756,6 @@ const StudioView = () => {
           </label>
         `).join('')}
       </div>
-    </section>
-
-    <section class="card">
-      <h3>Rollenverwaltung</h3>
-      <p class="muted">Nur Owner dürfen Rollen ändern. Änderungen werden über <code>set-user-role</code> ausgeführt.</p>
-      ${state.currentRole !== 'owner' ? '<p class="muted">Keine Berechtigung zur Rollenverwaltung.</p>' : ''}
-      ${state.currentRole === 'owner' ? roleUsers.map((user) => `
-        <div class="list-item">
-          <div><strong>${user.email ?? user.user_id}</strong></div>
-          <div class="muted">user_id: <code>${user.user_id}</code></div>
-          <div class="inline-actions">
-            <span>Aktuelle Rolle: <code>${user.role}</code></span>
-            <select data-user-role-select="${user.user_id}">
-              ${['owner', 'editor', 'viewer'].map((roleOption) => `<option value="${roleOption}" ${user.role === roleOption ? 'selected' : ''}>${roleOption}</option>`).join('')}
-            </select>
-            <button data-user-role-save="${user.user_id}">Rolle setzen</button>
-          </div>
-          <div>
-            <strong>Änderungsverlauf</strong>
-            ${(roleAuditLogsByUser[user.user_id] ?? []).map((entry) => `<div class="muted">${new Date(entry.created_at).toLocaleString()} • ${entry.action} • actor: ${entry.actor_user_id ?? 'system'} • details: ${JSON.stringify(entry.details ?? {})}</div>`).join('') || '<p class="muted">Keine Änderungen protokolliert.</p>'}
-          </div>
-        </div>
-      `).join('') || '<p class="muted">Keine Benutzer in user_roles gefunden.</p>' : ''}
     </section>
 
     <section class="card split">
@@ -1150,6 +1125,8 @@ const OpsView = () => {
   const limits = parseObject(adminSettings.global_limits, {});
   const toggles = parseObject(adminSettings.feature_toggles, {});
   const exportFilters = state.adminWorkspace.exportFilters ?? {};
+  const roleUsers = state.roleManagement.users ?? [];
+  const roleAuditLogsByUser = state.roleManagement.auditLogsByUser ?? {};
   const buildSection = (jobType) => {
     const jobs = state.monitor.deadLetters[jobType] ?? [];
     const filter = state.monitor.filters[jobType] ?? { errorCode: 'all', search: '' };
@@ -1239,6 +1216,28 @@ const OpsView = () => {
         <button data-export-fn="export_campaigns_csv">Campaigns CSV</button>
         <button data-export-fn="export_book_seed_overview_csv">Book Seed Overview CSV</button>
       </div>
+    </section>
+    <section class="card">
+      <h3>Benutzer & Rollen</h3>
+      <p class="muted">Nur Owner dürfen Rollen ändern. Änderungen werden über <code>set-user-role</code> ausgeführt.</p>
+      ${state.currentRole !== 'owner' ? '<p class="muted">Keine Berechtigung zur Rollenverwaltung.</p>' : ''}
+      ${state.currentRole === 'owner' ? roleUsers.map((user) => `
+        <div class="list-item">
+          <div><strong>${user.email ?? user.user_id}</strong></div>
+          <div class="muted">user_id: <code>${user.user_id}</code></div>
+          <div class="inline-actions">
+            <span>Aktuelle Rolle: <code>${user.role}</code></span>
+            <select data-user-role-select="${user.user_id}">
+              ${['owner', 'editor', 'viewer'].map((roleOption) => `<option value="${roleOption}" ${user.role === roleOption ? 'selected' : ''}>${roleOption}</option>`).join('')}
+            </select>
+            <button data-user-role-save="${user.user_id}">Rolle setzen</button>
+          </div>
+          <div>
+            <strong>Änderungsverlauf</strong>
+            ${(roleAuditLogsByUser[user.user_id] ?? []).map((entry) => `<div class="muted">${new Date(entry.created_at).toLocaleString()} • ${entry.action} • actor: ${entry.actor_user_id ?? 'system'} • details: ${JSON.stringify(entry.details ?? {})}</div>`).join('') || '<p class="muted">Keine Änderungen protokolliert.</p>'}
+          </div>
+        </div>
+      `).join('') || '<p class="muted">Keine Benutzer in user_roles gefunden.</p>' : ''}
     </section>
     <section class="card">
       <h3>Admin Settings (Owner only)</h3>
@@ -2080,24 +2079,6 @@ const bindStudioEvents = () => {
     }
   });
 
-  document.querySelectorAll('[data-user-role-save]').forEach((button) => {
-    button.addEventListener('click', async () => {
-      const userId = button.dataset.userRoleSave;
-      const select = document.querySelector(`[data-user-role-select="${userId}"]`);
-      const nextRole = select?.value;
-      if (!userId || !nextRole) return setStatus('Ungültige Rollenänderung: user_id oder Rolle fehlt.');
-      try {
-        await invokeSetUserRole(userId, nextRole);
-        await loadRoleManagement();
-        setStatus(`Rolle für ${userId} auf "${nextRole}" aktualisiert.`);
-        renderLayout(StudioView());
-        bindStudioEvents();
-      } catch (error) {
-        setStatus(error.message);
-      }
-    });
-  });
-
   document.querySelectorAll('[data-open]').forEach((el) => {
     el.addEventListener('click', async () => {
       state.selectedId = el.dataset.open;
@@ -2766,6 +2747,7 @@ const bindOpsEvents = () => {
   const refreshOps = async (message = null) => {
     await loadBufferState();
     await loadAdminWorkspace();
+    await loadRoleManagement();
     renderLayout(OpsView());
     bindOpsEvents();
     if (message) setStatus(message);
@@ -2889,6 +2871,20 @@ const bindOpsEvents = () => {
       if (error) return setStatus(`${exportFn} fehlgeschlagen: ${error.message}`);
       triggerCsvDownload(data ?? '', `${exportFn}_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`);
       setStatus(`${exportFn} erfolgreich exportiert.`);
+    });
+  });
+  document.querySelectorAll('[data-user-role-save]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const userId = button.dataset.userRoleSave;
+      const select = document.querySelector(`[data-user-role-select="${userId}"]`);
+      const nextRole = select?.value;
+      if (!userId || !nextRole) return setStatus('Ungültige Rollenänderung: user_id oder Rolle fehlt.');
+      try {
+        await invokeSetUserRole(userId, nextRole);
+        await refreshOps(`Rolle für ${userId} auf "${nextRole}" aktualisiert.`);
+      } catch (error) {
+        setStatus(error.message);
+      }
     });
   });
   document.getElementById('admin-save-limits-toggles')?.addEventListener('click', async () => {
@@ -3018,11 +3014,6 @@ const renderView = async (viewName) => {
       logger.error('load_posts_failed', { message: error.message });
     }
     try {
-      await loadRoleManagement();
-    } catch (error) {
-      logger.warn('load_role_management_failed', { message: error.message });
-    }
-    try {
       await loadPdfWorkspace(session);
     } catch (error) {
       logger.warn('load_pdf_workspace_failed', { message: error.message });
@@ -3049,6 +3040,11 @@ const renderView = async (viewName) => {
       await loadAdminWorkspace();
     } catch (error) {
       logger.warn('load_admin_workspace_failed', { message: error.message });
+    }
+    try {
+      await loadRoleManagement();
+    } catch (error) {
+      logger.warn('load_role_management_failed', { message: error.message });
     }
     renderLayout(OpsView());
     bindEvents(viewName, session);
