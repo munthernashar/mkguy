@@ -4,6 +4,7 @@ import { getCurrentView, getParam, getSession, signInWithMagicLink, signOut, exc
 
 const app = document.getElementById('app');
 const navButtons = document.querySelectorAll('button[data-view]');
+let booksHandlersBound = false;
 
 const renderLayout = (html) => {
   app.innerHTML = html;
