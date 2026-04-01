@@ -310,6 +310,8 @@ const mapDbPostToStudioPost = (dbPost) => {
     hook: selectedVariant?.hook ?? '',
     link: dbPost.destination_url ?? '',
     utm: dbPost.utm_url ?? '',
+    utmManualOverride: Boolean(dbPost.utm_manual_override),
+    utmProfileId: dbPost.utm_profile_id ?? null,
     hasImage: selectedVariant?.hasImage ?? false,
     variants: variants.length ? variants : [{ name: 'A', text: dbPost.body ?? '', is_selected: true }],
     hashtags: selectedVariant?.hashtags ?? [],
@@ -336,6 +338,8 @@ const loadPostsFromDb = async () => {
       selected_variant_id,
       destination_url,
       utm_url,
+      utm_manual_override,
+      utm_profile_id,
       post_variants (
         id,
         content,
@@ -358,6 +362,10 @@ const loadPostsFromDb = async () => {
   }
 
   state.posts = data.map(mapDbPostToStudioPost);
+  await Promise.all(state.posts.filter((post) => isUuid(post.id)).map(async (post) => {
+    const { data: generated } = await supabase.rpc('build_post_utm_url', { p_post_id: post.id });
+    post.generatedUtmUrl = generated ?? null;
+  }));
   state.selectedId = state.posts.some((post) => post.id === state.selectedId) ? state.selectedId : getFallbackSelectedId();
 };
 
@@ -453,6 +461,20 @@ const getFallbackSelectedId = (removedId = null) => {
   const remainingPosts = removedId ? state.posts.filter((post) => post.id !== removedId) : state.posts;
   if (!remainingPosts.length) return null;
   return remainingPosts[0].id;
+};
+
+const metricValue = (value) => Number(value ?? 0);
+const pct = (value) => `${metricValue(value).toFixed(2)}%`;
+const getVariantWinnerReason = (winner, second) => {
+  if (!winner) return 'Keine Metrikdaten vorhanden.';
+  if (!second) return `Variante ${winner.variant_name} gewinnt mangels Vergleichswert.`;
+  if (metricValue(winner.ctr) !== metricValue(second.ctr)) {
+    return `Gewinnt über CTR (${pct(winner.ctr)} vs. ${pct(second.ctr)}).`;
+  }
+  if (metricValue(winner.engagement_rate) !== metricValue(second.engagement_rate)) {
+    return `CTR gleich; Engagement entscheidet (${pct(winner.engagement_rate)} vs. ${pct(second.engagement_rate)}).`;
+  }
+  return 'CTR und Engagement gleich; höhere Impressionen als Tie-Breaker.';
 };
 
 const statusPill = (status) => `<span class="status-pill">${status}</span>`;
@@ -644,6 +666,11 @@ const StudioView = () => {
   const profileConnectionFlow = state.buffer.profileConnectionFlow[selected.platform] ?? PROFILE_CONNECTION_FLOW.RECONNECT_REQUIRED;
   const profileErrorAction = state.buffer.profileErrorActions[selected.platform] ?? null;
   const selectedSeriesRule = state.campaignWorkspace.seriesRules.find((rule) => rule.campaign_id === selectedCampaignId) ?? null;
+  const utmGeneratedUrl = selected.generatedUtmUrl ?? checks.composedLink;
+  const utmValidationMessages = [];
+  if (!/^https?:\/\/.+/i.test(selected.link ?? '')) utmValidationMessages.push('Basis-URL fehlt oder ist ungültig.');
+  if (selected.utmManualOverride && !/^utm_[a-z]+=[^&=]+(?:&utm_[a-z]+=[^&=]+)*$/i.test(selected.utm ?? '')) utmValidationMessages.push('UTM-Override muss key=value Paare mit utm_ Präfix enthalten.');
+  const utmSourceLabel = selected.utmManualOverride ? 'Manual Override' : `Auto (Rule/Profile${selected.utmProfileId ? ' + Profile' : ' ohne Profile-Override'})`;
   const activePlatformMix = parseStringArray(selectedCampaign?.platform_mix, []);
   const cadence = parseObject(selectedCampaign?.cadence, {});
   const calendarRange = getCalendarRange(state.campaignWorkspace.calendarView, state.campaignWorkspace.calendarAnchorDate);
@@ -795,6 +822,12 @@ const StudioView = () => {
         <label>CTA <input id="cta-input" value="${selected.cta}" /></label>
         <label>Link <input id="link-input" value="${selected.link}" /></label>
         <label>UTM <input id="utm-input" value="${selected.utm}" /></label>
+      </div>
+      <div class="card">
+        <h4>UTM Transparenz</h4>
+        <p class="muted">Quelle: <code>${utmSourceLabel}</code>${selected.utmProfileId ? ` • Profil: <code>${selected.utmProfileId}</code>` : ''}</p>
+        <p class="muted">Erzeugte URL: <code>${escapeHtml(utmGeneratedUrl ?? '—')}</code></p>
+        <p class="${utmValidationMessages.length ? 'danger' : 'muted'}">Validierung: ${utmValidationMessages.length ? utmValidationMessages.join(' ') : 'OK'}</p>
       </div>
       <p class="hint">Hook-Hinweise: ${HOOK_HINTS.join(' • ')}</p>
       <p class="hint">CTA-Hinweise: ${CTA_HINTS.join(' • ')}</p>
@@ -1245,6 +1278,71 @@ const OpsView = () => {
   `;
 };
 
+const DashboardView = () => {
+  const widgets = state.kpi.widgets ?? {};
+  const topCtr = widgets.top_ctr_posts ?? [];
+  const platformComparison = widgets.platform_comparison ?? [];
+  const underperformers = widgets.underperformers ?? [];
+  const timeseries = state.kpi.timeseries ?? [];
+  const variantRows = state.kpi.variantPerformance ?? [];
+  const variantByPost = variantRows.reduce((acc, row) => {
+    acc[row.post_id] = acc[row.post_id] ?? { title: row.title, platform: row.platform, rows: [] };
+    acc[row.post_id].rows.push(row);
+    return acc;
+  }, {});
+
+  return `
+    <section class="card">
+      <h2>KPI Dashboard</h2>
+      <div class="inline-actions"><button id="refresh-dashboard">Dashboard aktualisieren</button></div>
+      <p class="muted">Aggregationen aus <code>dashboard_widgets</code> + ergänzende Zeitreihe aus <code>post_metrics</code>.</p>
+      <div class="kpi-grid">
+        <div class="kpi-tile">
+          <strong>Top CTR</strong>
+          ${topCtr.map((item, index) => `<div class="muted">#${index + 1} ${escapeHtml(item.title ?? item.post_id)} • ${pct(item.ctr)}</div>`).join('') || '<div class="muted">Keine Daten.</div>'}
+        </div>
+        <div class="kpi-tile">
+          <strong>Plattformvergleich</strong>
+          ${platformComparison.map((item) => `<div class="muted">${item.platform}: CTR ${pct(item.ctr)} • Engagement ${pct(item.engagement_rate)}</div>`).join('') || '<div class="muted">Keine Daten.</div>'}
+        </div>
+        <div class="kpi-tile">
+          <strong>Underperformer</strong>
+          ${underperformers.map((item) => `<div class="muted">${escapeHtml(item.title ?? item.post_id)} • CTR ${pct(item.ctr)}</div>`).join('') || '<div class="muted">Keine Daten.</div>'}
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h3>Zeitreihe (CTR / Engagement je Tag)</h3>
+      ${timeseries.map((point) => `<div class="muted">${point.metric_date}: CTR ${pct(point.ctr)} • Engagement ${pct(point.engagement_rate)} • Impressions ${point.impressions}</div>`).join('') || '<p class="muted">Keine Zeitreihenwerte im Zeitraum.</p>'}
+    </section>
+
+    <section class="card">
+      <h3>Variantenleistung je Post (A/B/C)</h3>
+      ${Object.entries(variantByPost).map(([postId, postData]) => {
+    const sorted = [...postData.rows].sort((a, b) => (
+      metricValue(b.ctr) - metricValue(a.ctr)
+      || metricValue(b.engagement_rate) - metricValue(a.engagement_rate)
+      || metricValue(b.impressions) - metricValue(a.impressions)
+    ));
+    const winner = sorted[0];
+    const second = sorted[1];
+    return `
+          <div class="list-item">
+            <strong>${escapeHtml(postData.title ?? postId)}</strong> <span class="muted">(${postData.platform})</span>
+            <div class="muted">Gewinner: <span class="winner">${winner?.variant_name ?? '—'}</span> — ${getVariantWinnerReason(winner, second)}</div>
+            <ul>
+              ${sorted.map((row) => `<li>${row.variant_name}: CTR ${pct(row.ctr)} • Engagement ${pct(row.engagement_rate)} • Impressions ${row.impressions}${row === winner ? ' ✅' : ''}</li>`).join('')}
+            </ul>
+          </div>
+        `;
+  }).join('') || '<p class="muted">Keine Variantenmetriken vorhanden.</p>'}
+    </section>
+
+    <p id="dashboard-status" class="muted">${state.kpi.loadingError ? `Fehler: ${escapeHtml(state.kpi.loadingError)}` : ''}</p>
+  `;
+};
+
 
 const loadPdfWorkspace = async (session) => {
   const { data: books, error: booksError } = await supabase
@@ -1417,6 +1515,63 @@ const loadCampaignWorkspace = async () => {
   if (state.campaignWorkspace.selectedCampaignId !== 'all' && !existingCampaignIds.has(state.campaignWorkspace.selectedCampaignId)) {
     state.campaignWorkspace.selectedCampaignId = 'all';
   }
+};
+
+const loadKpiDashboard = async () => {
+  const to = new Date();
+  const from = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  state.kpi.range = { from: from.toISOString().slice(0, 10), to: to.toISOString().slice(0, 10) };
+  state.kpi.loadingError = null;
+
+  const { data: widgets, error: widgetError } = await supabase.rpc('dashboard_widgets', {
+    p_from: state.kpi.range.from,
+    p_to: state.kpi.range.to,
+    p_book_id: null,
+    p_campaign_id: null,
+    p_platform: null,
+  });
+  if (widgetError) throw widgetError;
+  state.kpi.widgets = widgets ?? {};
+
+  const { data: metricRows, error: metricError } = await supabase
+    .from('post_metrics')
+    .select('metric_date, impressions, clicks, interactions')
+    .gte('metric_date', state.kpi.range.from)
+    .lte('metric_date', state.kpi.range.to)
+    .order('metric_date', { ascending: true });
+  if (metricError) throw metricError;
+
+  const timeseriesMap = (metricRows ?? []).reduce((acc, row) => {
+    const key = row.metric_date;
+    const current = acc[key] ?? { metric_date: key, impressions: 0, clicks: 0, interactions: 0 };
+    current.impressions += Number(row.impressions ?? 0);
+    current.clicks += Number(row.clicks ?? 0);
+    current.interactions += Number(row.interactions ?? 0);
+    acc[key] = current;
+    return acc;
+  }, {});
+  state.kpi.timeseries = Object.values(timeseriesMap).map((row) => ({
+    ...row,
+    ctr: row.impressions > 0 ? (row.clicks * 100) / row.impressions : 0,
+    engagement_rate: row.impressions > 0 ? (row.interactions * 100) / row.impressions : 0,
+  }));
+
+  const { data: variantRows, error: variantError } = await supabase
+    .from('dashboard_post_kpis')
+    .select('post_id, title, platform, post_variant_id, ctr, engagement_rate, impressions');
+  if (variantError) throw variantError;
+  const variantIds = [...new Set((variantRows ?? []).map((row) => row.post_variant_id).filter(Boolean))];
+  const { data: variants } = variantIds.length
+    ? await supabase.from('post_variants').select('id, metadata').in('id', variantIds)
+    : { data: [] };
+  const variantNameById = (variants ?? []).reduce((acc, variant) => {
+    acc[variant.id] = variant.metadata?.name ?? 'A';
+    return acc;
+  }, {});
+  state.kpi.variantPerformance = (variantRows ?? []).map((row) => ({
+    ...row,
+    variant_name: variantNameById[row.post_variant_id] ?? 'A',
+  }));
 };
 
 const loadMediaAssets = async (postId = null) => {
@@ -2007,6 +2162,8 @@ const bindStudioEvents = () => {
       hook: '',
       link: '',
       utm: '',
+      utmManualOverride: false,
+      utmProfileId: null,
       hasImage: false,
       variants: [{ name: 'A', text: '', is_selected: true }],
       hashtags: [],
@@ -2025,6 +2182,7 @@ const bindStudioEvents = () => {
           language: newPost.language,
           destination_url: '',
           utm_url: '',
+          utm_manual_override: false,
           created_by: userId,
           updated_by: userId,
         })
@@ -2159,6 +2317,7 @@ const bindStudioEvents = () => {
             language: post.language ?? 'de',
             destination_url: post.link ?? '',
             utm_url: post.utm ?? '',
+            utm_manual_override: Boolean((post.utm ?? '').trim()),
             created_by: userId,
             updated_by: userId,
           })
@@ -2198,6 +2357,7 @@ const bindStudioEvents = () => {
           body: selectedVariant.text ?? '',
           destination_url: post.link ?? '',
           utm_url: post.utm ?? '',
+          utm_manual_override: Boolean((post.utm ?? '').trim()),
           status: post.status,
           selected_variant_id: selectedVariantId,
           updated_by: userId,
@@ -2770,6 +2930,23 @@ const bindOpsEvents = () => {
   });
 };
 
+const bindDashboardEvents = () => {
+  const setStatus = (msg) => {
+    const el = document.getElementById('dashboard-status');
+    if (el) el.textContent = msg;
+  };
+  document.getElementById('refresh-dashboard')?.addEventListener('click', async () => {
+    try {
+      await loadKpiDashboard();
+      renderLayout(DashboardView());
+      bindDashboardEvents();
+      setStatus('Dashboard aktualisiert.');
+    } catch (error) {
+      setStatus(`Dashboard-Aktualisierung fehlgeschlagen: ${error.message}`);
+    }
+  });
+};
+
 const bindEvents = (viewName, session) => {
   if (viewName === 'login') bindLoginEvents();
   if (viewName === 'health' && session) {
@@ -2781,6 +2958,7 @@ const bindEvents = (viewName, session) => {
   }
   if (viewName === 'studio') bindStudioEvents();
   if (viewName === 'ops') bindOpsEvents();
+  if (viewName === 'dashboard') bindDashboardEvents();
 };
 
 const handleAuthCallback = async () => {
@@ -2873,6 +3051,17 @@ const renderView = async (viewName) => {
       logger.warn('load_admin_workspace_failed', { message: error.message });
     }
     renderLayout(OpsView());
+    bindEvents(viewName, session);
+    return;
+  }
+
+  if (viewName === 'dashboard') {
+    try {
+      await loadKpiDashboard();
+    } catch (error) {
+      state.kpi.loadingError = error.message;
+    }
+    renderLayout(DashboardView());
     bindEvents(viewName, session);
     return;
   }
