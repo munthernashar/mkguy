@@ -1,8 +1,13 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.49.8';
 import { buildCorsHeaders } from '../_shared/cors.ts';
-import { bufferApi, decodeOpaqueToken } from '../_shared/buffer.ts';
-
-type MediaInput = { url: string; mime_type?: string; width?: number; height?: number };
+import {
+  DIRECT_FALLBACK_TRIGGERS,
+  DIRECT_PLATFORM_CAPABILITIES,
+  MediaInput,
+  PublishProviderError,
+  PublishVia,
+  publishWithProvider,
+} from '../_shared/publish-providers.ts';
 
 const ALLOWED_MEDIA = ['image/jpeg', 'image/png', 'image/webp', 'video/mp4'];
 
@@ -37,21 +42,34 @@ Deno.serve(async (request) => {
   if (!userId) return new Response(JSON.stringify({ ok: false, error: 'unauthorized' }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 
   const payload = await request.json();
-  const { post_id: postId, buffer_profile_id: profileId, text, media = [], scheduled_at: scheduledAt } = payload;
-  const validation = validateMedia(media);
+  const {
+    post_id: postId,
+    buffer_profile_id: profileId,
+    platform_account_id: platformAccountId,
+    publish_via: requestedPublishVia,
+    text,
+    platform = 'other',
+    media = [],
+    scheduled_at: scheduledAt,
+  } = payload;
 
-  const { data: profile } = await supabase.from('buffer_profiles').select('id, external_profile_id, buffer_account_id').eq('id', profileId).single();
-  const { data: account } = await supabase.from('buffer_accounts').select('id, owner_user_id, access_token_ref').eq('id', profile?.buffer_account_id).single();
-  if (!profile || !account || account.owner_user_id !== userId) return new Response(JSON.stringify({ ok: false, error: 'missing_profile' }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+  const publishVia: PublishVia = requestedPublishVia === 'direct' ? 'direct' : 'buffer';
+  const validation = validateMedia(media);
 
   const baseJob = {
     post_id: postId,
-    buffer_profile_id: profileId,
+    buffer_profile_id: profileId ?? null,
+    platform_account_id: platformAccountId ?? null,
     initiated_by: userId,
     status: 'running',
     attempts: 1,
-    provider: 'buffer',
-    debug_payload: { requested_at: new Date().toISOString() },
+    provider: publishVia,
+    debug_payload: {
+      requested_at: new Date().toISOString(),
+      publish_via: publishVia,
+      fallback_triggers: DIRECT_FALLBACK_TRIGGERS,
+      direct_capabilities: DIRECT_PLATFORM_CAPABILITIES,
+    },
   };
 
   const { data: job } = await supabase.from('publish_jobs').insert(baseJob).select('id, attempts, max_attempts').single();
@@ -61,40 +79,46 @@ Deno.serve(async (request) => {
       status: 'failed',
       last_error: JSON.stringify({ code: 'media_validation_failed', retriable: false, errors: validation.errors }),
       last_error_code: 'media_validation_failed',
-      debug_payload: { validation_errors: validation.errors },
+      debug_payload: { validation_errors: validation.errors, publish_via: publishVia },
     }).eq('id', job?.id);
 
     return new Response(JSON.stringify({ ok: false, error: 'media_validation_failed', errors: validation.errors }), { status: 422, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
   }
 
   try {
-    const accessToken = decodeOpaqueToken(account.access_token_ref);
-    if (!accessToken) throw new Error('missing_access_token');
-
-    const requestBody: Record<string, unknown> = {
-      profile_ids: [profile.external_profile_id],
+    const result = await publishWithProvider(publishVia, supabase, {
+      postId,
       text,
       media,
-    };
-    if (scheduledAt) requestBody.scheduled_at = scheduledAt;
-
-    const response = await bufferApi('/updates/create.json', accessToken, {
-      method: 'POST',
-      body: JSON.stringify(requestBody),
+      scheduledAt,
+      platform,
+      profileId,
+      platformAccountId,
+      userId,
     });
 
-    const update = await response.json();
     await supabase.from('publish_jobs').update({
-      status: scheduledAt ? 'queued' : 'published',
-      buffer_update_id: update?.updates?.[0]?.id ?? update?.id ?? null,
-      published_at: scheduledAt ? null : new Date().toISOString(),
+      status: result.status,
+      buffer_update_id: result.provider === 'buffer' ? result.externalId : null,
+      published_at: result.status === 'published' ? new Date().toISOString() : null,
       last_error: null,
       last_error_code: null,
-      debug_payload: { provider: 'buffer', response: update },
+      debug_payload: result.debug,
     }).eq('id', job?.id);
 
-    return new Response(JSON.stringify({ ok: true, job_id: job?.id, buffer_update_id: update?.updates?.[0]?.id ?? update?.id ?? null, scheduled: Boolean(scheduledAt) }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    return new Response(JSON.stringify({ ok: true, job_id: job?.id, publish_via: publishVia, external_id: result.externalId, buffer_update_id: result.provider === 'buffer' ? result.externalId : null, scheduled: result.scheduled }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
   } catch (error) {
+    if (error instanceof PublishProviderError) {
+      await supabase.from('publish_jobs').update({
+        status: 'failed',
+        last_error: JSON.stringify({ code: error.code, retriable: error.retriable, detail: error.message, diagnostic_path: error.diagnosticPath }),
+        last_error_code: error.code,
+        debug_payload: { provider: publishVia, diagnostic_path: error.diagnosticPath },
+      }).eq('id', job?.id);
+
+      return new Response(JSON.stringify({ ok: false, error: error.code, retriable: error.retriable, diagnostic_path: error.diagnosticPath, job_id: job?.id }), { status: error.status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+
     const isRetriable = String(error).includes('buffer_api_failed_5') || String(error).includes('timeout');
     const attempts = (job?.attempts ?? 0) + 1;
     const maxAttempts = job?.max_attempts ?? 5;
@@ -105,9 +129,9 @@ Deno.serve(async (request) => {
       next_attempt_at: isRetriable ? new Date(Date.now() + 5 * 60_000).toISOString() : null,
       last_error: JSON.stringify({ code: 'publish_failed', retriable: isRetriable, detail: String(error) }),
       last_error_code: 'publish_failed',
-      debug_payload: { provider: 'buffer', attempts, last_error: String(error) },
+      debug_payload: { provider: publishVia, attempts, last_error: String(error), diagnostic_path: 'publish/unhandled' },
     }).eq('id', job?.id);
 
-    return new Response(JSON.stringify({ ok: false, error: 'publish_failed', retriable: isRetriable, job_id: job?.id }), { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    return new Response(JSON.stringify({ ok: false, error: 'publish_failed', retriable: isRetriable, diagnostic_path: 'publish/unhandled', job_id: job?.id }), { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
   }
 });
