@@ -1127,6 +1127,11 @@ const OpsView = () => {
   const exportFilters = state.adminWorkspace.exportFilters ?? {};
   const roleUsers = state.roleManagement.users ?? [];
   const roleAuditLogsByUser = state.roleManagement.auditLogsByUser ?? {};
+  const authUserCount = roleUsers.length;
+  const assignedRoleCount = roleUsers.filter((user) => Boolean(user.current_role)).length;
+  const roleManagementEmptyState = authUserCount === 0
+    ? '<p class="muted">Keine Auth-User gefunden.</p>'
+    : '<p class="muted">Auth-User vorhanden, aber noch keine Rollen zugewiesen.</p>';
   const buildSection = (jobType) => {
     const jobs = state.monitor.deadLetters[jobType] ?? [];
     const filter = state.monitor.filters[jobType] ?? { errorCode: 'all', search: '' };
@@ -1221,16 +1226,20 @@ const OpsView = () => {
       <h3>Benutzer & Rollen</h3>
       <p class="muted">Nur Owner dürfen Rollen ändern. Änderungen werden über <code>set-user-role</code> ausgeführt.</p>
       ${state.currentRole !== 'owner' ? '<p class="muted">Keine Berechtigung zur Rollenverwaltung.</p>' : ''}
+      ${state.currentRole === 'owner' ? `<p class="muted">Auth-User: <code>${authUserCount}</code> • Mit Rolle: <code>${assignedRoleCount}</code></p>` : ''}
       ${state.currentRole === 'owner' ? roleUsers.map((user) => {
         const label = [user.display_name, user.email].filter(Boolean).join(' • ') || user.user_id;
+        const roleLabel = user.current_role ? `<code>${user.current_role}</code>` : '<span class="muted">keine Rolle</span>';
+        const selectedRole = user.current_role ?? '';
         return `
         <div class="list-item">
           <div><strong>${escapeHtml(label)}</strong></div>
           <div class="muted">user_id: <code>${user.user_id}</code></div>
           <div class="inline-actions">
-            <span>Aktuelle Rolle: <code>${user.current_role}</code></span>
+            <span>Aktuelle Rolle: ${roleLabel}</span>
             <select data-user-role-select="${user.user_id}">
-              ${['owner', 'editor', 'viewer'].map((roleOption) => `<option value="${roleOption}" ${user.current_role === roleOption ? 'selected' : ''}>${roleOption}</option>`).join('')}
+              <option value="" ${selectedRole === '' ? 'selected' : ''}>keine Rolle</option>
+              ${['owner', 'editor', 'viewer'].map((roleOption) => `<option value="${roleOption}" ${selectedRole === roleOption ? 'selected' : ''}>${roleOption}</option>`).join('')}
             </select>
             <button data-user-role-save="${user.user_id}">Rolle setzen</button>
           </div>
@@ -1240,7 +1249,7 @@ const OpsView = () => {
           </div>
         </div>
       `;
-      }).join('') || '<p class="muted">Keine Benutzer in user_roles gefunden.</p>' : ''}
+      }).join('') || roleManagementEmptyState : ''}
     </section>
     <section class="card">
       <h3>Admin Settings (Owner only)</h3>
