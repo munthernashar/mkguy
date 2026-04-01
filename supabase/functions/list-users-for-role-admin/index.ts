@@ -77,7 +77,7 @@ Deno.serve(async (request) => {
       const { data, error } = await admin.auth.admin.listUsers({ page, perPage });
       if (error) {
         log('error', 'list_users_for_role_admin_list_users_failed', { reason: error.message, actorId, page });
-        return new Response(JSON.stringify({ ok: false, error: 'operation_failed' }), {
+        return new Response(JSON.stringify({ ok: false, error: 'operation_failed', error_message: error.message }), {
           status: 500,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
@@ -103,7 +103,7 @@ Deno.serve(async (request) => {
         reason: rolesError.message ?? 'unknown',
         actorId,
       });
-      return new Response(JSON.stringify({ ok: false, error: 'operation_failed' }), {
+      return new Response(JSON.stringify({ ok: false, error: 'operation_failed', error_message: rolesError.message ?? 'unknown' }), {
         status: 500,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
@@ -142,7 +142,7 @@ Deno.serve(async (request) => {
     });
   } catch (error) {
     log('error', 'list_users_for_role_admin_exception', { reason: String(error) });
-    return new Response(JSON.stringify({ ok: false, error: 'operation_failed' }), {
+    return new Response(JSON.stringify({ ok: false, error: 'operation_failed', error_message: String(error) }), {
       status: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });

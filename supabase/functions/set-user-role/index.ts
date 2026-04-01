@@ -83,7 +83,7 @@ Deno.serve(async (request) => {
 
     if (error) {
       log('error', 'set_user_role_failed', { reason: error.message, actorId });
-      return new Response(JSON.stringify({ ok: false, error: 'operation_failed' }), {
+      return new Response(JSON.stringify({ ok: false, error: 'operation_failed', error_message: error.message }), {
         status: 500,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
@@ -95,7 +95,7 @@ Deno.serve(async (request) => {
     });
   } catch (error) {
     log('error', 'set_user_role_exception', { reason: String(error) });
-    return new Response(JSON.stringify({ ok: false, error: 'operation_failed' }), {
+    return new Response(JSON.stringify({ ok: false, error: 'operation_failed', error_message: String(error) }), {
       status: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
