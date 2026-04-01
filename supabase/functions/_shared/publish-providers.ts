@@ -5,22 +5,22 @@ export type MediaInput = { url: string; mime_type?: string; width?: number; heig
 export type PublishVia = 'buffer' | 'direct';
 
 export type PlatformCapability = {
-  textOnly: boolean;
+  text: boolean;
   media: boolean;
   scheduling: boolean;
   notes: string;
 };
 
 export const DIRECT_PLATFORM_CAPABILITIES: Record<string, PlatformCapability> = {
-  linkedin: { textOnly: true, media: false, scheduling: false, notes: 'Direct nur Text-only sofort; Media/Scheduling via Buffer.' },
-  x: { textOnly: true, media: false, scheduling: false, notes: 'Direct nur Text-only sofort; Media/Scheduling via Buffer.' },
-  instagram: { textOnly: false, media: false, scheduling: false, notes: 'Direct Publishing derzeit nicht unterstützt.' },
-  facebook: { textOnly: false, media: false, scheduling: false, notes: 'Direct Publishing derzeit nicht unterstützt.' },
-  threads: { textOnly: false, media: false, scheduling: false, notes: 'Direct Publishing derzeit nicht unterstützt.' },
-  tiktok: { textOnly: false, media: false, scheduling: false, notes: 'Direct Publishing derzeit nicht unterstützt.' },
-  youtube: { textOnly: false, media: false, scheduling: false, notes: 'Direct Publishing derzeit nicht unterstützt.' },
-  pinterest: { textOnly: false, media: false, scheduling: false, notes: 'Direct Publishing derzeit nicht unterstützt.' },
-  other: { textOnly: false, media: false, scheduling: false, notes: 'Direct Publishing derzeit nicht unterstützt.' },
+  linkedin: { text: true, media: false, scheduling: false, notes: 'Direct unterstützt nur sofortige Textposts; Media/Scheduling via Buffer.' },
+  x: { text: true, media: false, scheduling: false, notes: 'Direct unterstützt nur sofortige Textposts; Media/Scheduling via Buffer.' },
+  instagram: { text: false, media: false, scheduling: false, notes: 'Direct Publishing derzeit nicht unterstützt.' },
+  facebook: { text: false, media: false, scheduling: false, notes: 'Direct Publishing derzeit nicht unterstützt.' },
+  threads: { text: false, media: false, scheduling: false, notes: 'Direct Publishing derzeit nicht unterstützt.' },
+  tiktok: { text: false, media: false, scheduling: false, notes: 'Direct Publishing derzeit nicht unterstützt.' },
+  youtube: { text: false, media: false, scheduling: false, notes: 'Direct Publishing derzeit nicht unterstützt.' },
+  pinterest: { text: false, media: false, scheduling: false, notes: 'Direct Publishing derzeit nicht unterstützt.' },
+  other: { text: false, media: false, scheduling: false, notes: 'Direct Publishing derzeit nicht unterstützt.' },
 };
 
 export const DIRECT_FALLBACK_TRIGGERS = [
@@ -37,6 +37,7 @@ export const DIRECT_FALLBACK_TRIGGERS = [
     description: 'Benötigter Scheduling-Modus ist in Buffer funktional nicht vorhanden.',
   },
 ] as const;
+type DirectFallbackTriggerCode = typeof DIRECT_FALLBACK_TRIGGERS[number]['code'];
 
 export type PublishContext = {
   postId: string;
@@ -47,6 +48,16 @@ export type PublishContext = {
   profileId?: string | null;
   platformAccountId?: string | null;
   userId: string;
+};
+
+type PlatformAccountRow = {
+  owner_user_id?: string | null;
+  platform: string;
+  is_active?: boolean | null;
+  auth_status?: string | null;
+  access_token_ref?: string | null;
+  refresh_token_ref?: string | null;
+  token_expires_at?: string | null;
 };
 
 export type PublishResult = {
@@ -75,6 +86,38 @@ export class PublishProviderError extends Error {
 const ensureOwnership = <T extends { owner_user_id?: string | null }>(row: T | null, userId: string, errorCode: string) => {
   if (!row || row.owner_user_id !== userId) {
     throw new PublishProviderError(errorCode, 'Account not found for user.', `auth/${errorCode}`, 404, false);
+  }
+};
+
+const normalizePlatform = (platform: string) => platform.toLowerCase().replace(/[^a-z0-9]+/g, '_');
+const platformCode = (platform: string, suffix: string) => `direct_${normalizePlatform(platform)}_${suffix}`;
+
+const assertActiveDirectAccount = (account: PlatformAccountRow) => {
+  if (!account.is_active) {
+    throw new PublishProviderError(platformCode(account.platform, 'account_inactive'), 'Platform account is inactive.', 'direct/account_active', 409, false);
+  }
+
+  if (account.auth_status !== 'connected') {
+    const statusSuffix = account.auth_status === 'expired'
+      ? 'auth_expired'
+      : account.auth_status === 'revoked'
+        ? 'auth_revoked'
+        : account.auth_status === 'error'
+          ? 'auth_error'
+          : 'auth_not_connected';
+    throw new PublishProviderError(platformCode(account.platform, statusSuffix), 'Platform account is not connected.', 'direct/auth_status', 409, false);
+  }
+
+  if (!account.access_token_ref) {
+    throw new PublishProviderError(platformCode(account.platform, 'token_missing'), 'No direct access token available.', 'direct/token_storage/access', 422, false);
+  }
+
+  if (!account.refresh_token_ref) {
+    throw new PublishProviderError(platformCode(account.platform, 'refresh_token_missing'), 'No direct refresh token available.', 'direct/token_storage/refresh', 422, false);
+  }
+
+  if (account.token_expires_at && Date.parse(account.token_expires_at) <= Date.now()) {
+    throw new PublishProviderError(platformCode(account.platform, 'token_expired'), 'Direct access token is expired.', 'direct/token_expiry', 409, false);
   }
 };
 
@@ -121,19 +164,16 @@ const publishDirect = async (supabase: SupabaseClient, ctx: PublishContext): Pro
 
   const { data: account } = await supabase
     .from('platform_accounts')
-    .select('id, owner_user_id, platform, auth_status, metadata, access_token_ref, refresh_token_ref')
+    .select('id, owner_user_id, platform, is_active, auth_status, metadata, access_token_ref, refresh_token_ref, token_expires_at')
     .eq('id', ctx.platformAccountId)
     .single();
 
   ensureOwnership(account, ctx.userId, 'direct_platform_account_missing');
   const capability = DIRECT_PLATFORM_CAPABILITIES[account.platform] ?? DIRECT_PLATFORM_CAPABILITIES.other;
+  assertActiveDirectAccount(account);
 
-  if (account.auth_status !== 'connected') {
-    throw new PublishProviderError('direct_auth_not_connected', 'Platform account is not connected.', 'direct/auth_status', 409, false);
-  }
-
-  if (!account.access_token_ref) {
-    throw new PublishProviderError('direct_token_missing', 'No direct access token available.', 'direct/token_storage', 422, false);
+  if (ctx.platform !== account.platform) {
+    throw new PublishProviderError(platformCode(account.platform, 'platform_mismatch'), 'Payload platform does not match direct platform account.', 'direct/platform_validation', 422, false);
   }
 
   if (ctx.scheduledAt && !capability.scheduling) {
@@ -144,8 +184,8 @@ const publishDirect = async (supabase: SupabaseClient, ctx: PublishContext): Pro
     throw new PublishProviderError('direct_media_not_supported', capability.notes, 'direct/capabilities/media', 422, false);
   }
 
-  if (!capability.textOnly) {
-    throw new PublishProviderError('direct_platform_not_supported', capability.notes, 'direct/capabilities/platform', 422, false);
+  if (!capability.text) {
+    throw new PublishProviderError(platformCode(account.platform, 'platform_not_supported'), capability.notes, 'direct/capabilities/platform', 422, false);
   }
 
   const externalId = `direct_${account.platform}_${crypto.randomUUID()}`;
@@ -166,3 +206,6 @@ export const publishWithProvider = async (
   if (publishVia === 'direct') return publishDirect(supabase, context);
   return publishViaBuffer(supabase, context);
 };
+
+export const isAllowedDirectFallbackTrigger = (code: string | null | undefined): code is DirectFallbackTriggerCode =>
+  Boolean(code) && DIRECT_FALLBACK_TRIGGERS.some((trigger) => trigger.code === code);
