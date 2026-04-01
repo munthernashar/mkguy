@@ -95,19 +95,27 @@ Deno.serve(async (request) => {
 
     const userIds = users.map((entry) => entry.id);
 
-    const [{ data: roles, error: rolesError }, { data: profiles, error: profilesError }] = await Promise.all([
-      admin.from('user_roles').select('user_id, role, updated_at, created_at').in('user_id', userIds),
-      admin.from('profiles').select('user_id, display_name').in('user_id', userIds),
-    ]);
-
-    if (rolesError || profilesError) {
+    const { data: roles, error: rolesError } = userIds.length > 0
+      ? await admin.from('user_roles').select('user_id, role, updated_at, created_at').in('user_id', userIds)
+      : { data: [], error: null };
+    if (rolesError) {
       log('error', 'list_users_for_role_admin_join_failed', {
-        reason: rolesError?.message ?? profilesError?.message ?? 'unknown',
+        reason: rolesError.message ?? 'unknown',
         actorId,
       });
       return new Response(JSON.stringify({ ok: false, error: 'operation_failed' }), {
         status: 500,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    const { data: profiles, error: profilesError } = userIds.length > 0
+      ? await admin.from('profiles').select('user_id, display_name').in('user_id', userIds)
+      : { data: [], error: null };
+    if (profilesError) {
+      log('warn', 'list_users_for_role_admin_profiles_join_failed', {
+        reason: profilesError.message ?? 'unknown',
+        actorId,
       });
     }
 
