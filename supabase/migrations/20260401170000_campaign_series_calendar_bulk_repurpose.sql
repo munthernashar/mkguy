@@ -27,12 +27,7 @@ create table if not exists public.campaign_series_rules (
   deleted_at timestamptz,
   version integer not null default 1,
   check (array_length(allowed_weekdays, 1) > 0),
-  check (
-    not exists (
-      select 1 from unnest(allowed_weekdays) as d
-      where d < 0 or d > 6
-    )
-  )
+  check (allowed_weekdays <@ array[0,1,2,3,4,5,6]::int[])
 );
 
 create table if not exists public.evergreen_repost_rules (
