@@ -275,6 +275,20 @@ const applyFilters = (post) => Object.entries(state.filters).every(([key, value]
 
 const getPost = () => state.posts.find((p) => p.id === state.selectedId) ?? state.posts[0];
 const isUuid = (value) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value ?? '');
+const extractFunctionErrorMessage = (error, data = null) => {
+  if (data?.error_message) return String(data.error_message);
+  if (!error) return null;
+  if (error.context) {
+    try {
+      const parsed = JSON.parse(error.context);
+      if (parsed?.error_message) return String(parsed.error_message);
+      if (parsed?.error) return String(parsed.error);
+    } catch (_) {
+      // noop
+    }
+  }
+  return String(error.message ?? error);
+};
 const getGenerationConfig = (post) => ({
   platform: post?.generationConfig?.platform ?? post?.platform ?? 'linkedin',
   language: post?.generationConfig?.language ?? post?.language ?? 'de',
@@ -1132,12 +1146,12 @@ const OpsView = () => {
   const authUserCount = roleUsers.length;
   const assignedRoleCount = roleUsers.filter((user) => Boolean(user.current_role)).length;
   const roleManagementStatusMessage = roleManagementLoadError
-    ? `<p class="muted">Fehler beim Laden: ${escapeHtml(roleManagementLoadError)}</p>`
+    ? `<p id="admin-role-status" class="muted">Admin-Status: ${escapeHtml(roleManagementLoadError)}</p>`
     : authUserCount === 0
-      ? '<p class="muted">Keine Auth-User gefunden.</p>'
+      ? '<p id="admin-role-status" class="muted">Admin-Status: Keine Auth-User gefunden.</p>'
       : assignedRoleCount === 0
-        ? '<p class="muted">Auth-User gefunden, aber keine Rollen zugewiesen.</p>'
-        : `<p class="muted">Auth-User: <code>${authUserCount}</code> • Mit Rolle: <code>${assignedRoleCount}</code></p>`;
+        ? '<p id="admin-role-status" class="muted">Admin-Status: Auth-User gefunden, aber keine Rollen zugewiesen.</p>'
+        : `<p id="admin-role-status" class="muted">Admin-Status: Auth-User: <code>${authUserCount}</code> • Mit Rolle: <code>${assignedRoleCount}</code></p>`;
   const buildSection = (jobType) => {
     const jobs = state.monitor.deadLetters[jobType] ?? [];
     const filter = state.monitor.filters[jobType] ?? { errorCode: 'all', search: '' };
@@ -1628,12 +1642,13 @@ const loadRoleManagement = async () => {
     body: {},
   });
   if (roleUsersError) {
-    const rawMessage = String(roleUsersError.message ?? roleUsersError);
-    state.roleManagement.loadError = `Benutzerrollen konnten nicht geladen werden (${rawMessage})`;
+    const rawMessage = extractFunctionErrorMessage(roleUsersError, roleUsersData);
+    state.roleManagement.loadError = `Benutzerrollen konnten nicht geladen werden (${rawMessage ?? 'operation_failed'})`;
     return;
   }
   if (roleUsersData?.ok === false) {
-    state.roleManagement.loadError = `Benutzerrollen konnten nicht geladen werden (${roleUsersData.error ?? 'operation_failed'})`;
+    const functionErrorText = roleUsersData.error_message ?? roleUsersData.error ?? 'operation_failed';
+    state.roleManagement.loadError = `Benutzerrollen konnten nicht geladen werden (${functionErrorText})`;
     return;
   }
 
@@ -1694,7 +1709,7 @@ const invokeSetUserRole = async (userId, role) => {
   if (data?.ok === false) {
     if (data.error === 'forbidden') throw new Error('Policy-Verletzung: Nur Owner dürfen Rollen ändern.');
     if (data.error === 'invalid_request') throw new Error('Ungültige Rollenänderung: user_id oder Rolle fehlt/ist ungültig.');
-    throw new Error(`set-user-role Fehler: ${data.error ?? 'operation_failed'}`);
+    throw new Error(`set-user-role Fehler: ${data.error_message ?? data.error ?? 'operation_failed'}`);
   }
 };
 
