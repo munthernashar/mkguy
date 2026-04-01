@@ -28,6 +28,12 @@ const IMAGE_ASPECT_RATIOS = {
   x: '16:9',
   threads: '1:1',
 };
+const PREVIEW_LIMITS = {
+  linkedin: 3000,
+  instagram: 2200,
+  x: 280,
+  threads: 500,
+};
 
 const TRANSITIONS = {
   draft: ['review', 'archived'],
@@ -62,6 +68,9 @@ const state = {
     summary: null,
     deadLetters: { publish: [], generation: [] },
     selectedDetail: null,
+  },
+  mediaLibrary: {
+    assets: [],
   },
   pdfWorkspace: {
     books: [],
@@ -342,6 +351,36 @@ const escapeHtml = (value = '') => value
   .replaceAll('"', '&quot;')
   .replaceAll("'", '&#39;');
 
+const truncateText = (value, max) => {
+  if (!value || value.length <= max) return value;
+  return `${value.slice(0, Math.max(0, max - 1))}…`;
+};
+
+const parseRatio = (ratio) => {
+  const [w, h] = String(ratio ?? '').split(':').map(Number);
+  if (!w || !h) return null;
+  return w / h;
+};
+
+const ratioValidation = (asset, platform) => {
+  const required = IMAGE_ASPECT_RATIOS[platform] ?? '1:1';
+  const requiredRatio = parseRatio(required);
+  const width = Number(asset?.metadata?.width ?? asset?.metadata?.dimensions?.width ?? 0);
+  const height = Number(asset?.metadata?.height ?? asset?.metadata?.dimensions?.height ?? 0);
+  if (!width || !height || !requiredRatio) {
+    return { required, actual: 'unbekannt', ok: false, reason: 'Keine Bildmaße im Asset-Metadatum.' };
+  }
+  const actual = width / height;
+  const delta = Math.abs(actual - requiredRatio);
+  const ok = delta < 0.03;
+  return {
+    required,
+    actual: `${width}:${height}`,
+    ok,
+    reason: ok ? 'Seitenverhältnis passt.' : `Abweichung erkannt (${actual.toFixed(2)} statt ${requiredRatio.toFixed(2)}).`,
+  };
+};
+
 const renderInsightList = (items) => {
   if (!Array.isArray(items) || !items.length) return '<li class="muted">Keine Einträge.</li>';
   return items.map((item) => `<li>${escapeHtml(String(item))}</li>`).join('');
@@ -432,6 +471,10 @@ const StudioView = () => {
     acc[insight.document_id] = insight;
     return acc;
   }, {});
+  const selectedAssetId = selectedVariant?.imageAssetId ?? null;
+  const selectedAsset = state.mediaLibrary.assets.find((asset) => asset.id === selectedAssetId) ?? null;
+  const ratioCheck = selectedAsset ? ratioValidation(selectedAsset, selected.platform) : null;
+  const previewLimit = PREVIEW_LIMITS[selected.platform] ?? 280;
 
   return `
     <section class="card">
@@ -612,12 +655,63 @@ const StudioView = () => {
         <button id="pick-winner">Gewinner markieren (is_selected)</button>
       </div>
 
+      <h4>Post-Preview (${selected.platform})</h4>
+      <div class="card">
+        <p><strong>${escapeHtml(selected.hook || 'Hook')}</strong></p>
+        <p>${escapeHtml(truncateText(text, previewLimit))}</p>
+        <p class="muted">${selected.hashtags.map((tag) => escapeHtml(tag)).join(' ')}</p>
+        ${selectedAsset ? `<p class="muted">Asset: <code>${selectedAsset.storage_path}</code> (${selectedAsset.mime_type ?? 'n/a'})</p>` : '<p class="muted">Kein Asset verknüpft.</p>'}
+        <p class="${text.length > previewLimit ? 'danger' : 'muted'}">Länge in Vorschau: ${Math.min(text.length, previewLimit)}/${previewLimit}</p>
+      </div>
+
+      <h4>Media Library Workflow</h4>
+      <div class="grid">
+        <label>Asset auswählen/ersetzen
+          <select id="media-asset-select">
+            <option value="">Kein Asset</option>
+            ${state.mediaLibrary.assets.filter((asset) => asset.asset_type === 'image').map((asset) => `<option value="${asset.id}" ${asset.id === selectedAssetId ? 'selected' : ''}>${asset.storage_path}</option>`).join('')}
+          </select>
+        </label>
+        <label>Alt-Text
+          <input id="media-alt-text" value="${escapeHtml(selectedAsset?.metadata?.alt_text ?? '')}" placeholder="Beschreibender Alt-Text" />
+        </label>
+      </div>
+      <div class="grid">
+        <label>Neues Asset: Storage Path
+          <input id="new-media-path" placeholder="generated/post-123/image.png" />
+        </label>
+        <label>MIME-Type
+          <input id="new-media-mime" value="image/png" />
+        </label>
+        <label>Breite
+          <input id="new-media-width" type="number" min="1" placeholder="1080" />
+        </label>
+        <label>Höhe
+          <input id="new-media-height" type="number" min="1" placeholder="1080" />
+        </label>
+      </div>
+      <div class="inline-actions">
+        <button id="media-link-asset">Asset verknüpfen</button>
+        <button id="media-replace-asset">Asset ersetzen (neu anlegen)</button>
+        <button id="media-save-alt">Alt-Text speichern</button>
+      </div>
+      ${ratioCheck ? `<p class="${ratioCheck.ok ? 'muted' : 'danger'}">Ratio-Validierung (${selected.platform}): Soll ${ratioCheck.required}, Ist ${ratioCheck.actual} — ${ratioCheck.reason}</p>` : '<p class="danger">Ratio-Validierung: kein Asset oder keine Maße verfügbar.</p>'}
+
       <h4>Workflow</h4>
       <div class="inline-actions">
         ${WORKFLOW_STATUSES.filter((s) => s !== selected.status).map((status) => `<button data-transition="${status}">${status}</button>`).join('')}
         <button data-archive="${selected.id}">Archivieren</button>
         <button data-delete="${selected.id}">Löschen</button>
       </div>
+      ${selected.status === 'review' ? `
+        <h4>Review-Aktionen</h4>
+        <div class="inline-actions">
+          <button id="review-approve">Approve</button>
+          <button id="review-back-to-draft">Zurück zu Draft</button>
+          <button id="review-duplicate">Duplizieren</button>
+          <button id="review-adopt-series">In Serie übernehmen</button>
+        </div>
+      ` : ''}
       <p class="muted">Erlaubte Folgestati von <code>${selected.status}</code>: ${(TRANSITIONS[selected.status] || []).join(', ') || 'keine'}</p>
 
       <h4>Hashtag Panel</h4>
@@ -807,6 +901,20 @@ const loadBufferState = async () => {
   state.monitor.deadLetters.generation = generationDead ?? [];
 };
 
+const loadMediaAssets = async (postId = null) => {
+  let query = supabase
+    .from('media_assets')
+    .select('id, post_id, asset_type, provider, storage_path, mime_type, metadata, status, created_at')
+    .is('deleted_at', null)
+    .neq('status', 'deleted')
+    .order('created_at', { ascending: false })
+    .limit(100);
+  if (isUuid(postId)) query = query.eq('post_id', postId);
+  const { data, error } = await query;
+  if (error) throw error;
+  state.mediaLibrary.assets = data ?? [];
+};
+
 const loadCurrentRole = async (session) => {
   if (!session?.user?.id) {
     state.currentRole = null;
@@ -961,6 +1069,7 @@ const bindStudioEvents = () => {
     const session = await getSession();
     await loadPdfWorkspace(session);
     await loadBufferState();
+    await loadMediaAssets(state.selectedId);
     renderLayout(StudioView());
     if (statusMessage) {
       const el = document.getElementById('studio-status');
@@ -977,6 +1086,19 @@ const bindStudioEvents = () => {
     };
   };
   const getSelectedVariant = () => post.variants.find((v) => v.is_selected) ?? post.variants[0];
+  const persistWorkflowState = async (postId, nextStatus, extra = {}) => {
+    if (!isUuid(postId)) return;
+    const session = await getSession();
+    if (!session?.user?.id) throw new Error('Nicht eingeloggt: Status-Update nicht möglich.');
+    const payload = {
+      status: nextStatus,
+      workflow_status: nextStatus,
+      updated_by: session.user.id,
+      ...extra,
+    };
+    const { error } = await supabase.from('posts').update(payload).eq('id', postId);
+    if (error) throw error;
+  };
 
   document.getElementById('book-create-form')?.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -1093,8 +1215,9 @@ const bindStudioEvents = () => {
   });
 
   document.querySelectorAll('[data-open]').forEach((el) => {
-    el.addEventListener('click', () => {
+    el.addEventListener('click', async () => {
       state.selectedId = el.dataset.open;
+      await loadMediaAssets(state.selectedId);
       renderLayout(StudioView());
       bindStudioEvents();
     });
@@ -1323,6 +1446,7 @@ const bindStudioEvents = () => {
         hook_text: variant.is_selected ? post.hook : null,
         cta_text: variant.is_selected ? post.cta : null,
         hashtag_set: variant.is_selected ? (post.hashtags ?? []) : [],
+        image_asset_id: variant.imageAssetId ?? null,
         metadata: {
           ...(variant.metadata ?? {}),
           name: variant.name ?? String.fromCharCode(65 + index),
@@ -1372,7 +1496,7 @@ const bindStudioEvents = () => {
   });
 
   document.querySelectorAll('[data-transition]').forEach((button) => {
-    button.addEventListener('click', () => {
+    button.addEventListener('click', async () => {
       const target = button.dataset.transition;
       if (!canTransition(post.status, target)) {
         return setStatus(`Ungültiger Statuswechsel: ${post.status} → ${target}`);
@@ -1392,11 +1516,203 @@ const bindStudioEvents = () => {
       if (['scheduled', 'publishing', 'posted'].includes(target) && !hasRolePermission('publish')) {
         return setStatus('Scheduling/Publishing nur für owner erlaubt.');
       }
-      post.status = target;
-      setStatus(`Status gewechselt zu ${target}.`);
+      try {
+        const extra = target === 'approved'
+          ? { approval_status: 'approved', approved_at: new Date().toISOString() }
+          : (target === 'draft' ? { approval_status: 'pending', approved_at: null } : {});
+        await persistWorkflowState(post.id, target, extra);
+        post.status = target;
+        await loadPostsFromDb();
+        await loadMediaAssets(state.selectedId);
+        setStatus(`Status gewechselt zu ${target}.`);
+        renderLayout(StudioView());
+        bindStudioEvents();
+      } catch (error) {
+        setStatus(`Statuswechsel fehlgeschlagen: ${error.message}`);
+      }
+    });
+  });
+
+  document.getElementById('review-approve')?.addEventListener('click', async () => {
+    if (!hasRolePermission('approve')) return setStatus('Nur owner darf freigeben.');
+    const checks = getPreApprovalChecks(post);
+    if (!Object.values(checks).slice(0, 5).every(Boolean)) return setStatus('Freigabe blockiert: Pflichtchecks nicht erfüllt.');
+    try {
+      await persistWorkflowState(post.id, 'approved', { approval_status: 'approved', approved_at: new Date().toISOString() });
+      await loadPostsFromDb();
+      await loadMediaAssets(state.selectedId);
+      setStatus('Review-Aktion ausgeführt: Approve.');
       renderLayout(StudioView());
       bindStudioEvents();
-    });
+    } catch (error) {
+      setStatus(`Approve fehlgeschlagen: ${error.message}`);
+    }
+  });
+
+  document.getElementById('review-back-to-draft')?.addEventListener('click', async () => {
+    if (!hasRolePermission('submit_review')) return setStatus('Keine Rechte für Review-Rückgabe.');
+    try {
+      await persistWorkflowState(post.id, 'draft', { approval_status: 'pending', approved_at: null });
+      await loadPostsFromDb();
+      await loadMediaAssets(state.selectedId);
+      setStatus('Review-Aktion ausgeführt: Zurück zu Draft.');
+      renderLayout(StudioView());
+      bindStudioEvents();
+    } catch (error) {
+      setStatus(`Zurück zu Draft fehlgeschlagen: ${error.message}`);
+    }
+  });
+
+  document.getElementById('review-duplicate')?.addEventListener('click', async () => {
+    const selectedVariant = getSelectedVariant();
+    if (!isUuid(post.id) || !isUuid(selectedVariant?.id)) return setStatus('Duplizieren benötigt gespeicherten Post + Variante.');
+    try {
+      const session = await getSession();
+      if (!session?.user?.id) return setStatus('Nicht eingeloggt: Duplizieren nicht möglich.');
+      const userId = session.user.id;
+      const { data: duplicatedPost, error: postError } = await supabase
+        .from('posts')
+        .insert({
+          title: `${post.title} (Kopie)`,
+          body: selectedVariant.text ?? '',
+          status: 'draft',
+          workflow_status: 'draft',
+          platform: post.platform,
+          language: post.language,
+          campaign_id: post.campaignId ?? null,
+          destination_url: post.link ?? '',
+          utm_url: post.utm ?? '',
+          created_by: userId,
+          updated_by: userId,
+        })
+        .select('id')
+        .single();
+      if (postError) throw postError;
+      const { data: duplicatedVariant, error: variantError } = await supabase
+        .from('post_variants')
+        .insert({
+          post_id: duplicatedPost.id,
+          content: selectedVariant.text ?? '',
+          status: 'draft',
+          hook_text: post.hook ?? '',
+          cta_text: post.cta ?? '',
+          hashtag_set: post.hashtags ?? [],
+          image_asset_id: selectedVariant.imageAssetId ?? null,
+          metadata: { ...(selectedVariant.metadata ?? {}), source_post_id: post.id, name: 'A' },
+          created_by: userId,
+          updated_by: userId,
+        })
+        .select('id')
+        .single();
+      if (variantError) throw variantError;
+      await supabase.from('posts').update({ selected_variant_id: duplicatedVariant.id, updated_by: userId }).eq('id', duplicatedPost.id);
+      state.selectedId = duplicatedPost.id;
+      await loadPostsFromDb();
+      await loadMediaAssets(state.selectedId);
+      setStatus('Review-Aktion ausgeführt: Duplizieren.');
+      renderLayout(StudioView());
+      bindStudioEvents();
+    } catch (error) {
+      setStatus(`Duplizieren fehlgeschlagen: ${error.message}`);
+    }
+  });
+
+  document.getElementById('review-adopt-series')?.addEventListener('click', async () => {
+    if (!isUuid(post.id)) return setStatus('In Serie übernehmen benötigt gespeicherten Post.');
+    try {
+      const session = await getSession();
+      if (!session?.user?.id) return setStatus('Nicht eingeloggt: Serienübernahme nicht möglich.');
+      const selectedVariant = getSelectedVariant();
+      const { data, error } = await supabase.rpc('create_repurposed_post', {
+        p_master_post_id: post.id,
+        p_target_platform: post.platform,
+        p_title: `${post.title} (Serie)`,
+        p_body: `${selectedVariant?.text ?? post.title}\n\nSerie-Variante`,
+        p_created_by: session.user.id,
+      });
+      if (error) throw error;
+      if (data?.id) state.selectedId = data.id;
+      await loadPostsFromDb();
+      await loadMediaAssets(state.selectedId);
+      setStatus('Review-Aktion ausgeführt: In Serie übernehmen.');
+      renderLayout(StudioView());
+      bindStudioEvents();
+    } catch (error) {
+      setStatus(`In Serie übernehmen fehlgeschlagen: ${error.message}`);
+    }
+  });
+
+  document.getElementById('media-link-asset')?.addEventListener('click', async () => {
+    const selectedVariant = getSelectedVariant();
+    if (!isUuid(selectedVariant?.id)) return setStatus('Bitte Variante zuerst speichern.');
+    const mediaAssetId = document.getElementById('media-asset-select')?.value || null;
+    try {
+      const session = await getSession();
+      if (!session?.user?.id) return setStatus('Nicht eingeloggt: Verknüpfen nicht möglich.');
+      await supabase.from('post_variants').update({ image_asset_id: mediaAssetId, updated_by: session.user.id }).eq('id', selectedVariant.id);
+      await loadPostsFromDb();
+      await loadMediaAssets(state.selectedId);
+      setStatus('Asset mit post_variants.image_asset_id verknüpft.');
+      renderLayout(StudioView());
+      bindStudioEvents();
+    } catch (error) {
+      setStatus(`Asset-Verknüpfung fehlgeschlagen: ${error.message}`);
+    }
+  });
+
+  document.getElementById('media-replace-asset')?.addEventListener('click', async () => {
+    if (!isUuid(post.id)) return setStatus('Asset ersetzen benötigt gespeicherten Post.');
+    const selectedVariant = getSelectedVariant();
+    if (!isUuid(selectedVariant?.id)) return setStatus('Bitte Variante zuerst speichern.');
+    const storagePath = document.getElementById('new-media-path')?.value?.trim();
+    if (!storagePath) return setStatus('Bitte Storage Path für neues Asset angeben.');
+    try {
+      const session = await getSession();
+      if (!session?.user?.id) return setStatus('Nicht eingeloggt: Asset-Anlage nicht möglich.');
+      const width = Number(document.getElementById('new-media-width')?.value ?? 0);
+      const height = Number(document.getElementById('new-media-height')?.value ?? 0);
+      const mime = document.getElementById('new-media-mime')?.value?.trim() || 'image/png';
+      const altText = document.getElementById('media-alt-text')?.value?.trim() || '';
+      const { data: createdAsset, error: assetError } = await supabase
+        .from('media_assets')
+        .insert({
+          post_id: post.id,
+          owner_user_id: session.user.id,
+          asset_type: 'image',
+          storage_path: storagePath,
+          mime_type: mime,
+          metadata: { width, height, alt_text: altText },
+          status: 'ready',
+        })
+        .select('id')
+        .single();
+      if (assetError) throw assetError;
+      await supabase.from('post_variants').update({ image_asset_id: createdAsset.id, updated_by: session.user.id }).eq('id', selectedVariant.id);
+      await loadPostsFromDb();
+      await loadMediaAssets(state.selectedId);
+      setStatus(`Neues Asset erstellt und verknüpft: ${createdAsset.id}`);
+      renderLayout(StudioView());
+      bindStudioEvents();
+    } catch (error) {
+      setStatus(`Asset ersetzen fehlgeschlagen: ${error.message}`);
+    }
+  });
+
+  document.getElementById('media-save-alt')?.addEventListener('click', async () => {
+    const mediaAssetId = document.getElementById('media-asset-select')?.value || getSelectedVariant()?.imageAssetId;
+    if (!isUuid(mediaAssetId)) return setStatus('Kein gültiges Asset für Alt-Text ausgewählt.');
+    try {
+      const altText = document.getElementById('media-alt-text')?.value?.trim() ?? '';
+      const existing = state.mediaLibrary.assets.find((asset) => asset.id === mediaAssetId);
+      const metadata = { ...(existing?.metadata ?? {}), alt_text: altText };
+      await supabase.from('media_assets').update({ metadata }).eq('id', mediaAssetId);
+      await loadMediaAssets(state.selectedId);
+      setStatus('Alt-Text am media_assets-Metadatum gespeichert.');
+      renderLayout(StudioView());
+      bindStudioEvents();
+    } catch (error) {
+      setStatus(`Alt-Text speichern fehlgeschlagen: ${error.message}`);
+    }
   });
 
   document.getElementById('regen-hashtags')?.addEventListener('click', async () => {
@@ -1664,6 +1980,11 @@ const renderView = async (viewName) => {
       logger.warn('load_pdf_workspace_failed', { message: error.message });
     }
     await loadBufferState();
+    try {
+      await loadMediaAssets(state.selectedId);
+    } catch (error) {
+      logger.warn('load_media_assets_failed', { message: error.message });
+    }
     renderLayout(StudioView());
     bindEvents(viewName, session);
     return;
