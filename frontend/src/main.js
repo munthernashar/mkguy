@@ -21,6 +21,13 @@ const DIRECT_CAPABILITY_MATRIX = {
 const CTA_HINTS = ['Starte jetzt', 'Kostenlos testen', 'Mehr erfahren', 'Termin buchen'];
 const HOOK_HINTS = ['Provokante Frage', 'Statistik als Einstieg', 'Vorher/Nachher', 'Story in 1 Satz'];
 const WORKFLOW_STATUSES = ['draft', 'review', 'approved', 'scheduled', 'publishing', 'posted', 'failed', 'archived'];
+const STYLE_PRESETS = ['professional', 'storytelling', 'bold', 'educational'];
+const IMAGE_ASPECT_RATIOS = {
+  linkedin: '1:1',
+  instagram: '1:1',
+  x: '16:9',
+  threads: '1:1',
+};
 
 const TRANSITIONS = {
   draft: ['review', 'archived'],
@@ -188,6 +195,12 @@ const applyFilters = (post) => Object.entries(state.filters).every(([key, value]
 
 const getPost = () => state.posts.find((p) => p.id === state.selectedId) ?? state.posts[0];
 const isUuid = (value) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value ?? '');
+const getGenerationConfig = (post) => ({
+  platform: post?.generationConfig?.platform ?? post?.platform ?? 'linkedin',
+  language: post?.generationConfig?.language ?? post?.language ?? 'de',
+  variants: Number(post?.generationConfig?.variants ?? 2),
+  stylePreset: post?.generationConfig?.stylePreset ?? 'professional',
+});
 
 const mapDbPostToStudioPost = (dbPost) => {
   const variants = (dbPost.post_variants ?? []).map((variant, index) => ({
@@ -199,6 +212,8 @@ const mapDbPostToStudioPost = (dbPost) => {
     cta: variant.cta_text ?? '',
     hashtags: Array.isArray(variant.hashtag_set) ? variant.hashtag_set : [],
     hasImage: Boolean(variant.image_asset_id),
+    imageAssetId: variant.image_asset_id ?? null,
+    metadata: variant.metadata ?? {},
   }));
   const selectedVariant = variants.find((variant) => variant.is_selected) ?? variants[0];
 
@@ -219,6 +234,10 @@ const mapDbPostToStudioPost = (dbPost) => {
     hasImage: selectedVariant?.hasImage ?? false,
     variants: variants.length ? variants : [{ name: 'A', text: dbPost.body ?? '', is_selected: true }],
     hashtags: selectedVariant?.hashtags ?? [],
+    bookId: dbPost.book_id ?? null,
+    campaignId: dbPost.campaign_id ?? null,
+    seedId: dbPost.seed_id ?? null,
+    generationConfig: getGenerationConfig({ platform: dbPost.platform, language: dbPost.language }),
   };
 };
 
@@ -232,6 +251,9 @@ const loadPostsFromDb = async () => {
       status,
       platform,
       language,
+      book_id,
+      campaign_id,
+      seed_id,
       selected_variant_id,
       destination_url,
       utm_url,
@@ -381,6 +403,12 @@ const StudioView = () => {
   const selected = getPost();
   const checks = getPreApprovalChecks(selected);
   const selectedVariant = selected.variants.find((v) => v.is_selected) ?? selected.variants[0];
+  const generationConfig = getGenerationConfig(selected);
+  const qualityScore = Number(selectedVariant?.metadata?.quality_score ?? selectedVariant?.metadata?.guardrail_score ?? 0);
+  const guardrailViolations = Array.isArray(selectedVariant?.metadata?.violations)
+    ? selectedVariant.metadata.violations
+    : (Array.isArray(selectedVariant?.metadata?.guardrail_violations) ? selectedVariant.metadata.guardrail_violations : []);
+  const guardrailOk = selectedVariant?.metadata?.guardrail_ok ?? (guardrailViolations.length === 0);
   const text = selectedVariant?.text ?? '';
   const limits = PLATFORM_LIMITS[selected.platform] || PLATFORM_LIMITS.linkedin;
   const overLimit = text.length > limits.text;
@@ -548,6 +576,35 @@ const StudioView = () => {
         ${selected.variants.map((v, idx) => `<button data-variant="${idx}">${v.name}${v.is_selected ? ' ✅' : ''}</button>`).join('')}
         <button id="add-variant">Variante manuell anlegen</button>
       </div>
+      <h4>KI-Aktionen</h4>
+      <div class="grid">
+        <label>Plattform
+          <select id="ai-platform">
+            ${['linkedin', 'instagram', 'x', 'threads'].map((platform) => `<option value="${platform}" ${generationConfig.platform === platform ? 'selected' : ''}>${platform}</option>`).join('')}
+          </select>
+        </label>
+        <label>Sprache
+          <select id="ai-language">
+            ${['de', 'en'].map((language) => `<option value="${language}" ${generationConfig.language === language ? 'selected' : ''}>${language}</option>`).join('')}
+          </select>
+        </label>
+        <label>Variantenanzahl
+          <input id="ai-variant-count" type="number" min="1" max="3" value="${generationConfig.variants}" />
+        </label>
+        <label>Stilpreset
+          <select id="ai-style-preset">
+            ${STYLE_PRESETS.map((preset) => `<option value="${preset}" ${generationConfig.stylePreset === preset ? 'selected' : ''}>${preset}</option>`).join('')}
+          </select>
+        </label>
+      </div>
+      <div class="inline-actions">
+        <button id="generate-text">Text generieren</button>
+        <button id="generate-hashtags">Hashtags generieren</button>
+        <button id="generate-image">Bild generieren</button>
+        <button id="quality-check">Qualität prüfen</button>
+      </div>
+      ${!guardrailOk ? `<div class="danger">Guardrail-Warnung: ${guardrailViolations.map((v) => escapeHtml(String(v))).join(' • ') || 'Prüfung fehlgeschlagen'}</div>` : ''}
+      ${qualityScore > 0 && qualityScore < 70 ? `<div class="danger">Quality-Warnung: Score ${qualityScore}/100. Bitte Hook/CTA/Faktenlage überarbeiten.</div>` : ''}
       <textarea id="variant-text" rows="5">${text}</textarea>
       <div class="inline-actions">
         <span class="${overLimit ? 'danger' : 'muted'}">${text.length}/${limits.text} Zeichen (${selected.platform})</span>
@@ -911,6 +968,15 @@ const bindStudioEvents = () => {
     }
     bindStudioEvents();
   };
+  const syncGenerationConfigFromUi = () => {
+    post.generationConfig = {
+      platform: document.getElementById('ai-platform')?.value ?? post.platform ?? 'linkedin',
+      language: document.getElementById('ai-language')?.value ?? post.language ?? 'de',
+      variants: Math.min(3, Math.max(1, Number(document.getElementById('ai-variant-count')?.value ?? 2))),
+      stylePreset: document.getElementById('ai-style-preset')?.value ?? 'professional',
+    };
+  };
+  const getSelectedVariant = () => post.variants.find((v) => v.is_selected) ?? post.variants[0];
 
   document.getElementById('book-create-form')?.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -1162,6 +1228,60 @@ const bindStudioEvents = () => {
     bindStudioEvents();
   });
 
+  ['ai-platform', 'ai-language', 'ai-variant-count', 'ai-style-preset'].forEach((id) => {
+    document.getElementById(id)?.addEventListener('change', () => {
+      syncGenerationConfigFromUi();
+      setStatus(`KI-Parameter aktualisiert (${post.generationConfig.platform}/${post.generationConfig.language}/${post.generationConfig.variants}/${post.generationConfig.stylePreset}).`);
+    });
+  });
+
+  document.getElementById('generate-text')?.addEventListener('click', async () => {
+    syncGenerationConfigFromUi();
+    if (!isUuid(post.bookId)) return setStatus('Text generieren benötigt einen gespeicherten Post mit book_id.');
+    const payload = {
+      book_id: post.bookId,
+      campaign_id: isUuid(post.campaignId) ? post.campaignId : undefined,
+      seed_ids: isUuid(post.seedId) ? [post.seedId] : undefined,
+      platforms: [post.generationConfig.platform],
+      languages: [post.generationConfig.language],
+      variants_per_platform: post.generationConfig.variants,
+      batch_size: 1,
+      use_cache: false,
+    };
+    const { data, error } = await supabase.functions.invoke('generate-post-text', { body: payload });
+    if (error || data?.ok === false) return setStatus(`Textgenerierung fehlgeschlagen: ${error?.message ?? data?.error ?? 'unknown_error'}`);
+    await loadPostsFromDb();
+    setStatus(`Text generiert: ${data?.created_posts ?? 0} Post(s), ${data?.created_variants ?? 0} Variante(n). Stilpreset: ${post.generationConfig.stylePreset}.`);
+    renderLayout(StudioView());
+    bindStudioEvents();
+  });
+
+  const runHashtagGeneration = async () => {
+    syncGenerationConfigFromUi();
+    if (!isUuid(post.id)) return setStatus('Hashtag-Generierung nur für gespeicherte Posts verfügbar.');
+    const selectedVariant = getSelectedVariant();
+    if (!isUuid(selectedVariant?.id)) return setStatus('Bitte zuerst Variante speichern.');
+    const maxTags = (PLATFORM_LIMITS[post.generationConfig.platform] || PLATFORM_LIMITS.linkedin).hashtags;
+    const { data, error } = await supabase.functions.invoke('generate-hashtags', {
+      body: { post_id: post.id, language: post.generationConfig.language, max_tags: maxTags },
+    });
+    if (error || data?.ok === false) return setStatus(`Hashtag-Generierung fehlgeschlagen: ${error?.message ?? data?.error ?? 'unknown_error'}`);
+    const tags = String(data?.hashtags ?? '').split(/\s+/).map((tag) => tag.trim()).filter(Boolean).slice(0, maxTags);
+    const session = await getSession();
+    if (session?.user?.id) {
+      await supabase
+        .from('post_variants')
+        .update({ hashtag_set: tags, updated_by: session.user.id })
+        .eq('id', selectedVariant.id);
+    }
+    post.hashtags = tags;
+    selectedVariant.hashtags = tags;
+    setStatus(`Hashtags generiert (${tags.length}) und in post_variants übernommen.`);
+    renderLayout(StudioView());
+    bindStudioEvents();
+  };
+  document.getElementById('generate-hashtags')?.addEventListener('click', runHashtagGeneration);
+
   document.getElementById('save-editor')?.addEventListener('click', async () => {
     if (!hasRolePermission('edit')) return setStatus('Keine Bearbeitungsrechte.');
     const selectedVariant = post.variants.find((v) => v.is_selected) ?? post.variants[0];
@@ -1203,7 +1323,11 @@ const bindStudioEvents = () => {
         hook_text: variant.is_selected ? post.hook : null,
         cta_text: variant.is_selected ? post.cta : null,
         hashtag_set: variant.is_selected ? (post.hashtags ?? []) : [],
-        metadata: { name: variant.name ?? String.fromCharCode(65 + index) },
+        metadata: {
+          ...(variant.metadata ?? {}),
+          name: variant.name ?? String.fromCharCode(65 + index),
+          style_preset: post.generationConfig?.stylePreset ?? 'professional',
+        },
         created_by: userId,
         updated_by: userId,
       }));
@@ -1275,11 +1399,51 @@ const bindStudioEvents = () => {
     });
   });
 
-  document.getElementById('regen-hashtags')?.addEventListener('click', () => {
+  document.getElementById('regen-hashtags')?.addEventListener('click', async () => {
     if (!hasRolePermission('regenerate_hashtags')) return setStatus('Keine Rechte zum Regenerieren.');
-    const base = ['#growth', '#socialmedia', '#contentstrategy', '#buildinpublic', '#marketing'];
-    const limit = (PLATFORM_LIMITS[post.platform] || PLATFORM_LIMITS.linkedin).hashtags;
-    post.hashtags = base.slice(0, limit);
+    await runHashtagGeneration();
+  });
+
+  document.getElementById('generate-image')?.addEventListener('click', async () => {
+    syncGenerationConfigFromUi();
+    if (!isUuid(post.id)) return setStatus('Bildgenerierung nur für gespeicherte Posts verfügbar.');
+    const selectedVariant = getSelectedVariant();
+    if (!isUuid(selectedVariant?.id)) return setStatus('Bitte zuerst Variante speichern.');
+    const aspectRatio = IMAGE_ASPECT_RATIOS[post.generationConfig.platform] ?? '1:1';
+    const prompt = `${post.generationConfig.stylePreset} ${post.title ?? 'Social visual'} ${selectedVariant.text ?? ''}`.trim();
+    const { data, error } = await supabase.functions.invoke('generate-image', {
+      body: { post_id: post.id, platform: post.generationConfig.platform, aspect_ratio: aspectRatio, prompt },
+    });
+    if (error || data?.ok === false) return setStatus(`Bildgenerierung fehlgeschlagen: ${error?.message ?? data?.error ?? 'unknown_error'}`);
+    const session = await getSession();
+    if (session?.user?.id && data?.media_asset_id) {
+      await supabase
+        .from('post_variants')
+        .update({ image_asset_id: data.media_asset_id, updated_by: session.user.id })
+        .eq('id', selectedVariant.id);
+    }
+    selectedVariant.hasImage = true;
+    selectedVariant.imageAssetId = data?.media_asset_id ?? null;
+    post.hasImage = true;
+    setStatus(`Bildgenerierung gestartet. Media Asset: ${data?.media_asset_id ?? '—'}.`);
+    renderLayout(StudioView());
+    bindStudioEvents();
+  });
+
+  document.getElementById('quality-check')?.addEventListener('click', async () => {
+    const selectedVariant = getSelectedVariant();
+    if (!isUuid(selectedVariant?.id)) return setStatus('Qualitätscheck benötigt eine gespeicherte Variante.');
+    const { data, error } = await supabase.functions.invoke('quality-score-post', {
+      body: { post_variant_id: selectedVariant.id },
+    });
+    if (error || data?.ok === false) return setStatus(`Qualitätscheck fehlgeschlagen: ${error?.message ?? data?.error ?? 'unknown_error'}`);
+    selectedVariant.metadata = {
+      ...(selectedVariant.metadata ?? {}),
+      quality_score: data?.score ?? 0,
+      guardrail_ok: !(data?.violations?.length),
+      violations: data?.violations ?? [],
+    };
+    setStatus(`Qualitätscheck abgeschlossen (Score: ${data?.score ?? 0}/100).`);
     renderLayout(StudioView());
     bindStudioEvents();
   });
