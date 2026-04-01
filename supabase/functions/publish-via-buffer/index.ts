@@ -148,6 +148,7 @@ Deno.serve(async (request) => {
     await supabase.from('publish_jobs').update({
       status: result.status,
       buffer_update_id: result.provider === 'buffer' ? result.externalId : null,
+      direct_post_id: result.provider === 'direct' ? result.externalId : null,
       published_at: result.status === 'published' ? new Date().toISOString() : null,
       last_error: null,
       last_error_code: null,
@@ -158,15 +159,39 @@ Deno.serve(async (request) => {
     return new Response(JSON.stringify({ ok: true, job_id: job?.id, publish_via: publishVia, external_id: result.externalId, buffer_update_id: result.provider === 'buffer' ? result.externalId : null, scheduled: result.scheduled }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
   } catch (error) {
     if (error instanceof PublishProviderError) {
+      const mappedStatus = error.retriable ? 'queued' : 'failed';
       await supabase.from('publish_jobs').update({
-        status: 'failed',
-        last_error: JSON.stringify({ code: error.code, retriable: error.retriable, detail: error.message, diagnostic_path: error.diagnosticPath }),
+        status: mappedStatus,
+        attempts: error.retriable ? (job?.attempts ?? 1) + 1 : (job?.attempts ?? 1),
+        next_attempt_at: error.retriable ? new Date(Date.now() + 5 * 60_000).toISOString() : null,
+        last_error: JSON.stringify({
+          code: error.code,
+          category: error.category,
+          retriable: error.retriable,
+          detail: error.message,
+          diagnostic_path: error.diagnosticPath,
+          provider_status: error.providerStatus ?? null,
+          provider_payload: error.providerPayload ?? null,
+        }),
         last_error_code: error.code,
-        debug_payload: { provider: publishVia, diagnostic_path: error.diagnosticPath },
+        debug_payload: {
+          provider: publishVia,
+          diagnostic_path: error.diagnosticPath,
+          error_category: error.category,
+          provider_status: error.providerStatus ?? null,
+        },
         diagnostic_path: error.diagnosticPath,
       }).eq('id', job?.id);
 
-      return new Response(JSON.stringify({ ok: false, error: error.code, retriable: error.retriable, diagnostic_path: error.diagnosticPath, job_id: job?.id }), { status: error.status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      return new Response(JSON.stringify({
+        ok: false,
+        error: error.code,
+        error_category: error.category,
+        retriable: error.retriable,
+        diagnostic_path: error.diagnosticPath,
+        provider_status: error.providerStatus ?? null,
+        job_id: job?.id,
+      }), { status: error.status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
     const isRetriable = String(error).includes('buffer_api_failed_5') || String(error).includes('timeout');
