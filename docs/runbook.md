@@ -102,3 +102,16 @@ Der Restore ist nur bestanden, wenn alle folgenden Punkte dokumentiert wurden:
   - Kern-RPCs nicht ausführbar,
   - Rowcount-Differenzen ungeklärt,
   - referenzielle Integrität gebrochen.
+
+## 4. Manueller Backfill fehlender User-Rollen
+
+Für bestehende `auth.users` ohne Eintrag in `public.user_roles` steht eine Owner-only RPC bereit:
+
+```sql
+select public.backfill_missing_user_roles('viewer'::public.app_role);
+```
+
+Hinweise:
+- Idempotent: Der Backfill nutzt `on conflict (user_id) do nothing`.
+- Sichere Standardrolle: Standard ist `viewer` (alternativ z. B. `editor`).
+- Audit: Jeder Lauf schreibt einen Eintrag in `public.audit_logs` (`action = 'user_roles_backfill'`) mit `default_role` und `inserted_count`.
