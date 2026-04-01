@@ -16,6 +16,12 @@ const DIRECT_CAPABILITY_MATRIX = {
   linkedin: { textOnly: true, media: false, scheduling: false },
   instagram: { textOnly: false, media: false, scheduling: false },
   x: { textOnly: true, media: false, scheduling: false },
+  facebook: { textOnly: false, media: false, scheduling: false },
+  threads: { textOnly: false, media: false, scheduling: false },
+  tiktok: { textOnly: false, media: false, scheduling: false },
+  youtube: { textOnly: false, media: false, scheduling: false },
+  pinterest: { textOnly: false, media: false, scheduling: false },
+  other: { textOnly: false, media: false, scheduling: false },
 };
 
 const PROFILE_CONNECTION_FLOW = {
@@ -26,7 +32,7 @@ const PROFILE_CONNECTION_FLOW = {
 
 const PROVIDER_ERROR_ACTIONS = [
   {
-    match: /buffer_token_missing|buffer_account_missing|buffer_profile_missing|direct_auth_not_connected|direct_token_missing/i,
+    match: /buffer_token_missing|buffer_account_missing|buffer_profile_missing|direct_.*auth_|direct_.*token_/i,
     action: 'neu verbinden',
     hint: 'Verbindung ist abgelaufen oder fehlt. Bitte über „Buffer verbinden/Reconnect“ erneut autorisieren.',
   },
@@ -34,6 +40,11 @@ const PROVIDER_ERROR_ACTIONS = [
     match: /direct_platform_account_missing|buffer_profile_missing|profile_not_found|invalid_profile/i,
     action: 'profil neu zuordnen',
     hint: 'Das zugeordnete Profil passt nicht mehr. Bitte Profil-Mapping prüfen und neu zuordnen.',
+  },
+  {
+    match: /direct_requires_functional_gap|missing_buffer_feature_/i,
+    action: 'auf buffer wechseln',
+    hint: 'Direct ist nur bei funktionalen Buffer-Lücken erlaubt. Fallback-Grund setzen oder publish_via=buffer nutzen.',
   },
   {
     match: /publish_failed|buffer_api_failed_5|timeout|rate_limit|temporar/i,

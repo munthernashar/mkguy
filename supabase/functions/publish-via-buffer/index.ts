@@ -3,6 +3,7 @@ import { buildCorsHeaders } from '../_shared/cors.ts';
 import {
   DIRECT_FALLBACK_TRIGGERS,
   DIRECT_PLATFORM_CAPABILITIES,
+  isAllowedDirectFallbackTrigger,
   MediaInput,
   PublishProviderError,
   PublishVia,
@@ -30,6 +31,25 @@ const validateMedia = (media: MediaInput[]) => {
   return { ok: errors.length === 0, errors };
 };
 
+const resolvePublishVia = (requestedPublishVia: unknown, fallbackReasonCode: unknown): {
+  ok: boolean;
+  publishVia: PublishVia;
+  error?: string;
+  diagnosticPath?: string;
+} => {
+  if (requestedPublishVia !== 'direct') return { ok: true, publishVia: 'buffer' };
+  const triggerCode = typeof fallbackReasonCode === 'string' ? fallbackReasonCode : null;
+  if (!isAllowedDirectFallbackTrigger(triggerCode)) {
+    return {
+      ok: false,
+      publishVia: 'direct',
+      error: 'direct_requires_functional_gap',
+      diagnosticPath: 'publish/routing/fallback_trigger',
+    };
+  }
+  return { ok: true, publishVia: 'direct' };
+};
+
 Deno.serve(async (request) => {
   const corsHeaders = buildCorsHeaders(request.headers.get('origin'));
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders });
@@ -47,13 +67,15 @@ Deno.serve(async (request) => {
     buffer_profile_id: profileId,
     platform_account_id: platformAccountId,
     publish_via: requestedPublishVia,
+    fallback_reason_code: fallbackReasonCode,
     text,
     platform = 'other',
     media = [],
     scheduled_at: scheduledAt,
   } = payload;
 
-  const publishVia: PublishVia = requestedPublishVia === 'direct' ? 'direct' : 'buffer';
+  const publishViaDecision = resolvePublishVia(requestedPublishVia, fallbackReasonCode);
+  const publishVia: PublishVia = publishViaDecision.publishVia;
   const validation = validateMedia(media);
 
   const baseJob = {
@@ -67,6 +89,7 @@ Deno.serve(async (request) => {
     debug_payload: {
       requested_at: new Date().toISOString(),
       publish_via: publishVia,
+      fallback_reason_code: fallbackReasonCode ?? null,
       fallback_triggers: DIRECT_FALLBACK_TRIGGERS,
       direct_capabilities: DIRECT_PLATFORM_CAPABILITIES,
     },
@@ -74,12 +97,37 @@ Deno.serve(async (request) => {
 
   const { data: job } = await supabase.from('publish_jobs').insert(baseJob).select('id, attempts, max_attempts').single();
 
+  if (!publishViaDecision.ok) {
+    await supabase.from('publish_jobs').update({
+      status: 'failed',
+      last_error: JSON.stringify({
+        code: publishViaDecision.error,
+        retriable: false,
+        detail: 'publish_via=direct is only allowed for documented functional Buffer gaps.',
+        fallback_reason_code: fallbackReasonCode ?? null,
+      }),
+      last_error_code: publishViaDecision.error,
+      debug_payload: { routing: 'blocked', fallback_reason_code: fallbackReasonCode ?? null, publish_via: publishVia },
+      diagnostic_path: publishViaDecision.diagnosticPath,
+    }).eq('id', job?.id);
+
+    return new Response(JSON.stringify({
+      ok: false,
+      error: publishViaDecision.error,
+      retriable: false,
+      diagnostic_path: publishViaDecision.diagnosticPath,
+      job_id: job?.id,
+      allowed_fallback_triggers: DIRECT_FALLBACK_TRIGGERS,
+    }), { status: 422, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+  }
+
   if (!validation.ok) {
     await supabase.from('publish_jobs').update({
       status: 'failed',
       last_error: JSON.stringify({ code: 'media_validation_failed', retriable: false, errors: validation.errors }),
       last_error_code: 'media_validation_failed',
       debug_payload: { validation_errors: validation.errors, publish_via: publishVia },
+      diagnostic_path: 'publish/media_validation',
     }).eq('id', job?.id);
 
     return new Response(JSON.stringify({ ok: false, error: 'media_validation_failed', errors: validation.errors }), { status: 422, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
@@ -104,6 +152,7 @@ Deno.serve(async (request) => {
       last_error: null,
       last_error_code: null,
       debug_payload: result.debug,
+      diagnostic_path: null,
     }).eq('id', job?.id);
 
     return new Response(JSON.stringify({ ok: true, job_id: job?.id, publish_via: publishVia, external_id: result.externalId, buffer_update_id: result.provider === 'buffer' ? result.externalId : null, scheduled: result.scheduled }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
@@ -114,6 +163,7 @@ Deno.serve(async (request) => {
         last_error: JSON.stringify({ code: error.code, retriable: error.retriable, detail: error.message, diagnostic_path: error.diagnosticPath }),
         last_error_code: error.code,
         debug_payload: { provider: publishVia, diagnostic_path: error.diagnosticPath },
+        diagnostic_path: error.diagnosticPath,
       }).eq('id', job?.id);
 
       return new Response(JSON.stringify({ ok: false, error: error.code, retriable: error.retriable, diagnostic_path: error.diagnosticPath, job_id: job?.id }), { status: error.status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
@@ -130,6 +180,7 @@ Deno.serve(async (request) => {
       last_error: JSON.stringify({ code: 'publish_failed', retriable: isRetriable, detail: String(error) }),
       last_error_code: 'publish_failed',
       debug_payload: { provider: publishVia, attempts, last_error: String(error), diagnostic_path: 'publish/unhandled' },
+      diagnostic_path: 'publish/unhandled',
     }).eq('id', job?.id);
 
     return new Response(JSON.stringify({ ok: false, error: 'publish_failed', retriable: isRetriable, diagnostic_path: 'publish/unhandled', job_id: job?.id }), { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });

@@ -230,6 +230,8 @@ Der Wechsel von Buffer auf Direct-Publishing ist nur bei **funktionalen Lücken*
 
 Temporäre Buffer-Fehler werden weiterhin über Retry/Queue in `publish_jobs` behandelt und **dürfen keinen automatischen Providerwechsel** auslösen.
 
+Zusätzlich gilt serverseitig: `publish_via=direct` ist nur zulässig, wenn `fallback_reason_code` auf einen dieser Trigger gesetzt ist. Sonst wird mit `direct_requires_functional_gap` (`publish/routing/fallback_trigger`) abgebrochen.
+
 ### Tokenverwaltung und sichere Speicherung
 
 - Direct-Publishing nutzt `platform_accounts` als primäre Tokenquelle (`access_token_ref`, `refresh_token_ref`, `token_expires_at`, `secure_metadata`).
@@ -237,12 +239,13 @@ Temporäre Buffer-Fehler werden weiterhin über Retry/Queue in `publish_jobs` be
 
 ### Fehlercodes und Diagnosepfade (Direct)
 
-- `direct_platform_account_missing` → `direct/platform_account_lookup`
-- `direct_auth_not_connected` → `direct/auth_status`
-- `direct_token_missing` → `direct/token_storage`
+- `direct_<platform>_account_inactive` → `direct/account_active`
+- `direct_<platform>_auth_expired|auth_revoked|auth_error|auth_not_connected` → `direct/auth_status`
+- `direct_<platform>_token_missing|refresh_token_missing|token_expired` → `direct/token_storage/*`, `direct/token_expiry`
+- `direct_<platform>_platform_mismatch` → `direct/platform_validation`
 - `direct_scheduling_not_supported` → `direct/capabilities/scheduling`
 - `direct_media_not_supported` → `direct/capabilities/media`
-- `direct_platform_not_supported` → `direct/capabilities/platform`
+- `direct_<platform>_platform_not_supported` → `direct/capabilities/platform`
 
 Diese Informationen werden in `publish_jobs.last_error_code`, `publish_jobs.last_error` sowie `debug_payload`/`diagnostic_path` persistiert.
 
@@ -253,5 +256,11 @@ Diese Informationen werden in `publish_jobs.last_error_code`, `publish_jobs.last
 | linkedin | ✅ | ❌ | ❌ | Direct nur sofortige Textposts |
 | x | ✅ | ❌ | ❌ | Direct nur sofortige Textposts |
 | instagram | ❌ | ❌ | ❌ | Nicht unterstützt |
+| facebook | ❌ | ❌ | ❌ | Nicht unterstützt |
+| threads | ❌ | ❌ | ❌ | Nicht unterstützt |
+| tiktok | ❌ | ❌ | ❌ | Nicht unterstützt |
+| youtube | ❌ | ❌ | ❌ | Nicht unterstützt |
+| pinterest | ❌ | ❌ | ❌ | Nicht unterstützt |
+| other | ❌ | ❌ | ❌ | Nicht unterstützt |
 
 Nicht unterstützte Kombinationen werden im UI explizit markiert (z. B. `direct + media` oder `direct + scheduling`).
