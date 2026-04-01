@@ -151,6 +151,8 @@ const state = {
   ],
 };
 
+const LOCAL_SEED_POSTS = state.posts.map((post) => ({ ...post, variants: post.variants.map((variant) => ({ ...variant })) }));
+
 const renderLayout = (html) => {
   app.innerHTML = html;
 };
@@ -175,7 +177,78 @@ const applyFilters = (post) => Object.entries(state.filters).every(([key, value]
 });
 
 const getPost = () => state.posts.find((p) => p.id === state.selectedId) ?? state.posts[0];
-const createPostId = () => `post-${Date.now()}`;
+const isUuid = (value) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value ?? '');
+
+const mapDbPostToStudioPost = (dbPost) => {
+  const variants = (dbPost.post_variants ?? []).map((variant, index) => ({
+    id: variant.id,
+    name: variant.metadata?.name ?? String.fromCharCode(65 + index),
+    text: variant.content ?? '',
+    is_selected: dbPost.selected_variant_id ? dbPost.selected_variant_id === variant.id : index === 0,
+    hook: variant.hook_text ?? '',
+    cta: variant.cta_text ?? '',
+    hashtags: Array.isArray(variant.hashtag_set) ? variant.hashtag_set : [],
+    hasImage: Boolean(variant.image_asset_id),
+  }));
+  const selectedVariant = variants.find((variant) => variant.is_selected) ?? variants[0];
+
+  return {
+    id: dbPost.id,
+    title: dbPost.title ?? 'Ohne Titel',
+    section: dbPost.section ?? 'Content Studio',
+    book: dbPost.book ?? 'Unassigned',
+    campaign: dbPost.campaign ?? 'Drafts',
+    platform: dbPost.platform ?? 'linkedin',
+    language: dbPost.language ?? 'de',
+    tags: Array.isArray(dbPost.tags) ? dbPost.tags : [],
+    status: dbPost.status ?? 'draft',
+    cta: selectedVariant?.cta ?? '',
+    hook: selectedVariant?.hook ?? '',
+    link: dbPost.destination_url ?? '',
+    utm: dbPost.utm_url ?? '',
+    hasImage: selectedVariant?.hasImage ?? false,
+    variants: variants.length ? variants : [{ name: 'A', text: dbPost.body ?? '', is_selected: true }],
+    hashtags: selectedVariant?.hashtags ?? [],
+  };
+};
+
+const loadPostsFromDb = async () => {
+  const { data, error } = await supabase
+    .from('posts')
+    .select(`
+      id,
+      title,
+      body,
+      status,
+      platform,
+      language,
+      selected_variant_id,
+      destination_url,
+      utm_url,
+      post_variants (
+        id,
+        content,
+        hook_text,
+        cta_text,
+        hashtag_set,
+        image_asset_id,
+        metadata
+      )
+    `)
+    .is('deleted_at', null)
+    .order('updated_at', { ascending: false });
+
+  if (error) throw error;
+
+  if (!data?.length) {
+    state.posts = LOCAL_SEED_POSTS.map((post) => ({ ...post, variants: post.variants.map((variant) => ({ ...variant })) }));
+    state.selectedId = getFallbackSelectedId();
+    return;
+  }
+
+  state.posts = data.map(mapDbPostToStudioPost);
+  state.selectedId = state.posts.some((post) => post.id === state.selectedId) ? state.selectedId : getFallbackSelectedId();
+};
 
 const canTransition = (current, target) => TRANSITIONS[current]?.includes(target);
 
@@ -626,7 +699,7 @@ const bindStudioEvents = () => {
   });
 
   document.querySelectorAll('[data-delete]').forEach((button) => {
-    button.addEventListener('click', () => {
+    button.addEventListener('click', async () => {
       if (!hasRolePermission('delete')) return setStatus('Nur owner darf löschen.');
       if (state.posts.length <= 1) return setStatus('Mindestens ein Post muss bestehen bleiben.');
       const postId = button.dataset.delete;
@@ -634,17 +707,26 @@ const bindStudioEvents = () => {
       if (!postToDelete) return setStatus('Post wurde nicht gefunden.');
       const confirmed = window.confirm(`Post "${postToDelete.title}" wirklich endgültig löschen?`);
       if (!confirmed) return;
-      state.posts = state.posts.filter((item) => item.id !== postId);
-      state.selectedId = getFallbackSelectedId(postId);
-      setStatus(`Post "${postToDelete.title}" gelöscht.`);
-      renderLayout(StudioView());
-      bindStudioEvents();
+      try {
+        if (isUuid(postId)) {
+          const { error } = await supabase.from('posts').delete().eq('id', postId);
+          if (error) throw error;
+        } else {
+          state.posts = state.posts.filter((item) => item.id !== postId);
+          state.selectedId = getFallbackSelectedId(postId);
+        }
+        await loadPostsFromDb();
+        setStatus(`Post "${postToDelete.title}" gelöscht.`);
+        renderLayout(StudioView());
+        bindStudioEvents();
+      } catch (error) {
+        setStatus(`DB-Fehler beim Löschen: ${error.message}`);
+      }
     });
   });
 
-  document.getElementById('create-post')?.addEventListener('click', () => {
+  document.getElementById('create-post')?.addEventListener('click', async () => {
     const newPost = {
-      id: createPostId(),
       title: 'Neuer Post',
       section: 'Content Studio',
       book: 'Unassigned',
@@ -661,10 +743,55 @@ const bindStudioEvents = () => {
       variants: [{ name: 'A', text: '', is_selected: true }],
       hashtags: [],
     };
-    state.posts.unshift(newPost);
-    state.selectedId = newPost.id;
-    renderLayout(StudioView());
-    bindStudioEvents();
+    try {
+      const session = await getSession();
+      if (!session?.user?.id) return setStatus('Nicht eingeloggt: Post kann nicht gespeichert werden.');
+      const userId = session.user.id;
+      const { data: createdPost, error: postError } = await supabase
+        .from('posts')
+        .insert({
+          title: newPost.title,
+          body: '',
+          status: newPost.status,
+          platform: newPost.platform,
+          language: newPost.language,
+          destination_url: '',
+          utm_url: '',
+          created_by: userId,
+          updated_by: userId,
+        })
+        .select('id')
+        .single();
+      if (postError) throw postError;
+      const { data: createdVariant, error: variantError } = await supabase
+        .from('post_variants')
+        .insert({
+          post_id: createdPost.id,
+          content: '',
+          status: 'draft',
+          hook_text: '',
+          cta_text: '',
+          hashtag_set: [],
+          metadata: { name: 'A' },
+          created_by: userId,
+          updated_by: userId,
+        })
+        .select('id')
+        .single();
+      if (variantError) throw variantError;
+      const { error: selectVariantError } = await supabase
+        .from('posts')
+        .update({ selected_variant_id: createdVariant.id, updated_by: userId })
+        .eq('id', createdPost.id);
+      if (selectVariantError) throw selectVariantError;
+      state.selectedId = createdPost.id;
+      await loadPostsFromDb();
+      setStatus('Neuer Post in der Datenbank angelegt.');
+      renderLayout(StudioView());
+      bindStudioEvents();
+    } catch (error) {
+      setStatus(`DB-Fehler beim Erstellen: ${error.message}`);
+    }
   });
 
   document.querySelectorAll('[data-variant]').forEach((button) => {
@@ -685,7 +812,7 @@ const bindStudioEvents = () => {
     bindStudioEvents();
   });
 
-  document.getElementById('save-editor')?.addEventListener('click', () => {
+  document.getElementById('save-editor')?.addEventListener('click', async () => {
     if (!hasRolePermission('edit')) return setStatus('Keine Bearbeitungsrechte.');
     const selectedVariant = post.variants.find((v) => v.is_selected) ?? post.variants[0];
     selectedVariant.text = document.getElementById('variant-text').value;
@@ -693,9 +820,72 @@ const bindStudioEvents = () => {
     post.hook = document.getElementById('hook-input').value;
     post.link = document.getElementById('link-input').value;
     post.utm = document.getElementById('utm-input').value;
-    setStatus('Editorinhalt gespeichert.');
-    renderLayout(StudioView());
-    bindStudioEvents();
+    try {
+      const session = await getSession();
+      if (!session?.user?.id) return setStatus('Nicht eingeloggt: Speichern nicht möglich.');
+      const userId = session.user.id;
+      let postId = post.id;
+      const selectedVariantPayload = post.variants.find((variant) => variant.is_selected);
+      if (!isUuid(postId)) {
+        const { data: createdPost, error: createPostError } = await supabase
+          .from('posts')
+          .insert({
+            title: post.title ?? 'Neuer Post',
+            body: selectedVariant?.text ?? '',
+            status: post.status ?? 'draft',
+            platform: post.platform ?? 'linkedin',
+            language: post.language ?? 'de',
+            destination_url: post.link ?? '',
+            utm_url: post.utm ?? '',
+            created_by: userId,
+            updated_by: userId,
+          })
+          .select('id')
+          .single();
+        if (createPostError) throw createPostError;
+        postId = createdPost.id;
+      }
+      const normalizedVariants = post.variants.map((variant, index) => ({
+        id: isUuid(variant.id) ? variant.id : undefined,
+        post_id: postId,
+        content: variant.text ?? '',
+        status: 'draft',
+        hook_text: variant.is_selected ? post.hook : null,
+        cta_text: variant.is_selected ? post.cta : null,
+        hashtag_set: variant.is_selected ? (post.hashtags ?? []) : [],
+        metadata: { name: variant.name ?? String.fromCharCode(65 + index) },
+        created_by: userId,
+        updated_by: userId,
+      }));
+
+      const { data: upsertedVariants, error: upsertError } = await supabase
+        .from('post_variants')
+        .upsert(normalizedVariants, { onConflict: 'id' })
+        .select('id, metadata');
+      if (upsertError) throw upsertError;
+
+      const selectedVariantId = upsertedVariants?.find((variant) => variant.metadata?.name === (selectedVariantPayload?.name ?? 'A'))?.id ?? null;
+      const { error: postError } = await supabase
+        .from('posts')
+        .update({
+          body: selectedVariant.text ?? '',
+          destination_url: post.link ?? '',
+          utm_url: post.utm ?? '',
+          status: post.status,
+          selected_variant_id: selectedVariantId,
+          updated_by: userId,
+        })
+        .eq('id', postId);
+      if (postError) throw postError;
+
+      state.selectedId = postId;
+      await loadPostsFromDb();
+      setStatus('Editorinhalt in der Datenbank gespeichert.');
+      renderLayout(StudioView());
+      bindStudioEvents();
+    } catch (error) {
+      setStatus(`DB-Fehler beim Speichern: ${error.message}`);
+    }
   });
 
   document.getElementById('pick-winner')?.addEventListener('click', () => {
@@ -931,6 +1121,11 @@ const renderView = async (viewName) => {
   if (!session) return;
 
   if (viewName === 'studio') {
+    try {
+      await loadPostsFromDb();
+    } catch (error) {
+      logger.error('load_posts_failed', { message: error.message });
+    }
     await loadBufferState();
     renderLayout(StudioView());
     bindEvents(viewName, session);
