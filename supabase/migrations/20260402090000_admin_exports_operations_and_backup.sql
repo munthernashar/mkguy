@@ -240,7 +240,7 @@ as $$
       c.starts_at,
       c.ends_at,
       c.created_at,
-      c.book_id,
+      max(p.book_id) as book_id,
       count(distinct p.id) as post_count,
       count(distinct case when p.workflow_status = 'published' then p.id end) as published_post_count,
       string_agg(distinct coalesce(pa.platform, bp.service), '|' order by coalesce(pa.platform, bp.service)) as platforms
@@ -251,7 +251,16 @@ as $$
     where c.deleted_at is null
       and (p_from is null or c.created_at >= p_from)
       and (p_to is null or c.created_at <= p_to)
-      and (p_book_id is null or c.book_id = p_book_id)
+      and (
+        p_book_id is null
+        or exists (
+          select 1
+          from public.posts pb
+          where pb.campaign_id = c.id
+            and pb.book_id = p_book_id
+            and pb.deleted_at is null
+        )
+      )
       and (p_campaign_id is null or c.id = p_campaign_id)
       and (p_platform is null or exists (
         select 1
@@ -317,7 +326,15 @@ as $$
     from public.books b
     left join public.book_documents d on d.book_id = b.id and d.deleted_at is null
     left join public.book_insights i on i.book_id = b.id and i.deleted_at is null
-    left join public.campaigns c on c.book_id = b.id and c.deleted_at is null
+    left join public.campaigns c
+      on c.deleted_at is null
+      and exists (
+        select 1
+        from public.posts cp
+        where cp.campaign_id = c.id
+          and cp.book_id = b.id
+          and cp.deleted_at is null
+      )
     left join public.posts p on p.book_id = b.id and p.deleted_at is null
     where b.deleted_at is null
       and (p_from is null or b.created_at >= p_from)
