@@ -62,6 +62,37 @@ SUPABASE_ANON_KEY=<public-anon-key>
 SUPABASE_SERVICE_ROLE_KEY=<server-side-only>
 ```
 
+## 3.1) Known environment prerequisites
+
+Für einen stabilen Betriebszustand müssen folgende Werte **zwingend** korrekt gesetzt sein.
+Fehlen diese, entsteht häufig das Fehlerbild: **„Tabellen vorhanden, aber keine Daten sichtbar/verarbeitbar“**.
+
+### Frontend (öffentlich, in `frontend/config/*.js`)
+- `SUPABASE_URL` (muss exakt auf das Zielprojekt zeigen)
+- `SUPABASE_ANON_KEY` (gültiger Public Anon Key des Zielprojekts)
+- `APP_ENV` (z. B. `development`/`production`)
+- `APP_VERSION` (Release-Stand zur Nachvollziehbarkeit)
+
+### Supabase Functions (serverseitige Secrets)
+- `SUPABASE_URL`
+- `SUPABASE_ANON_KEY`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `APP_ENV`
+- `APP_VERSION`
+- `LOG_LEVEL`
+
+### URLs / Redirects / CORS
+- Supabase Auth `Site URL` zeigt auf die reale Frontend-URL (nicht localhost in Prod).
+- Redirect Allow-List enthält alle produktiven Callback-URLs (GitHub Pages inkl. Pfad).
+- CORS-Allow-Origin für Edge Functions enthält die produktive Origin (`https://<org>.github.io` oder konkrete Repo-URL).
+
+### Schnell-Diagnose bei „Tabellen da, aber keine Daten“
+1. Prüfen, ob Frontend auf **richtiges Projekt** zeigt (`SUPABASE_URL`, `SUPABASE_ANON_KEY`).
+2. Prüfen, ob der eingeloggte User einen Eintrag in `user_roles` besitzt (ohne Rolle greift RLS).
+3. Prüfen, ob Functions mit korrekten Secrets laufen (`supabase secrets list` / Deploy-Kontext).
+4. CORS/Redirect-Konfiguration gegen produktive Domain verifizieren.
+5. Health-Function (`health`) aufrufen, um Runtime/Config-Basis zu bestätigen.
+
 ## 4) GitHub-Pages Deploy (Frontend)
 
 1. Inhalte aus `frontend/` als statische Seite veröffentlichen.
