@@ -1,6 +1,7 @@
 import { PUBLIC_CONFIG } from './config.js';
 import { logger } from './logger.js';
 import { getCurrentView, getParam, getSession, signInWithMagicLink, signOut, exchangeAuthCode, writeAuditLog, buildViewUrl, hasAuthCode, readAuthError, signInWithPassword, signUpWithPassword } from './auth.js';
+import { supabase } from './supabaseClient.js';
 
 const app = document.getElementById('app');
 const navButtons = document.querySelectorAll('button[data-view]');
@@ -30,6 +31,15 @@ const state = {
   role: 'editor',
   filters: { book: 'all', campaign: 'all', platform: 'all', language: 'all', tag: 'all' },
   selectedId: 'p1',
+
+  buffer: {
+    accountId: null,
+    accounts: [],
+    profiles: [],
+    profileMap: {},
+    debug: null,
+  },
+
   posts: [
     {
       id: 'p1',
@@ -330,9 +340,52 @@ const StudioView = () => {
       </ul>
       <p class="muted">Composed URL: <code>${checks.composedLink}</code></p>
       <p class="muted">Rollenrechte: editor = bearbeiten/review/hashtag/winner; owner = volle Freigabe + Scheduling/Publishing.</p>
+
+      <h4>Buffer Connect & Mapping</h4>
+      <div class="inline-actions">
+        <button id="buffer-connect">Buffer verbinden</button>
+        <button id="buffer-reconnect">Reconnect</button>
+        <button id="buffer-sync">sync-buffer-profiles</button>
+      </div>
+      <p class="muted">Verbindungsstatus: ${state.buffer.accounts[0]?.access_status ?? 'nicht verbunden'}</p>
+      <label>Profil-Mapping (${selected.platform})
+        <select id="buffer-profile-map">
+          <option value="">Kein Profil</option>
+          ${state.buffer.profiles.filter((p) => p.service === selected.platform).map((p) => `<option value="${p.id}" ${state.buffer.profileMap[selected.platform] === p.id ? 'selected' : ''}>${p.profile_name} (${p.service})</option>`).join('')}
+        </select>
+      </label>
+      <div class="inline-actions">
+        <button id="buffer-publish-now">publish-via-buffer jetzt</button>
+        <button id="buffer-publish-scheduled">publish-via-buffer geplant (+15m)</button>
+      </div>
+
+      <h4>Debugpanel</h4>
+      <ul>
+        <li>Provider: <code>${state.buffer.debug?.provider ?? 'buffer'}</code></li>
+        <li>Update-ID: <code>${state.buffer.debug?.buffer_update_id ?? '—'}</code></li>
+        <li>Attempts: <code>${state.buffer.debug?.attempts ?? '—'}</code></li>
+        <li>Letzter Fehler: <code>${state.buffer.debug?.last_error ?? '—'}</code></li>
+      </ul>
       <p id="studio-status" class="muted"></p>
     </section>
   `;
+};
+
+
+const loadBufferState = async () => {
+  const { data: accounts } = await supabase.from('buffer_accounts').select('id, access_status, access_status, status').eq('status', 'active').order('updated_at', { ascending: false }).limit(1);
+  state.buffer.accounts = accounts ?? [];
+  state.buffer.accountId = accounts?.[0]?.id ?? null;
+
+  if (state.buffer.accountId) {
+    const { data: profiles } = await supabase.from('buffer_profiles').select('id, service, profile_name').eq('buffer_account_id', state.buffer.accountId).eq('status', 'active');
+    state.buffer.profiles = profiles ?? [];
+  } else {
+    state.buffer.profiles = [];
+  }
+
+  const { data: latestJob } = await supabase.from('publish_jobs').select('provider, buffer_update_id, attempts, last_error').order('created_at', { ascending: false }).limit(1);
+  state.buffer.debug = latestJob?.[0] ?? null;
 };
 
 const SessionGuard = async (viewName) => {
@@ -515,6 +568,64 @@ const bindStudioEvents = () => {
     bindStudioEvents();
   });
 
+
+  document.getElementById('buffer-connect')?.addEventListener('click', async () => {
+    const { data, error } = await supabase.functions.invoke('connect-buffer-oauth', { body: {} });
+    if (error || !data?.auth_url) return setStatus(`Buffer Connect fehlgeschlagen: ${error?.message ?? 'no_auth_url'}`);
+    window.location.href = data.auth_url;
+  });
+
+  document.getElementById('buffer-reconnect')?.addEventListener('click', async () => {
+    if (!state.buffer.accountId) return setStatus('Kein Buffer-Account für Reconnect vorhanden.');
+    const { data, error } = await supabase.functions.invoke('connect-buffer-oauth', { body: { reconnect_buffer_account_id: state.buffer.accountId } });
+    if (error || !data?.auth_url) return setStatus(`Reconnect fehlgeschlagen: ${error?.message ?? 'no_auth_url'}`);
+    window.location.href = data.auth_url;
+  });
+
+  document.getElementById('buffer-sync')?.addEventListener('click', async () => {
+    if (!state.buffer.accountId) return setStatus('Erst Buffer verbinden.');
+    const { data, error } = await supabase.functions.invoke('sync-buffer-profiles', { body: { buffer_account_id: state.buffer.accountId } });
+    if (error) return setStatus(`sync-buffer-profiles fehlgeschlagen: ${error.message}`);
+    setStatus(`sync-buffer-profiles: ${data?.synced_count ?? 0} Profile.`);
+    await loadBufferState();
+    renderLayout(StudioView());
+    bindStudioEvents();
+  });
+
+  document.getElementById('buffer-profile-map')?.addEventListener('change', (event) => {
+    state.buffer.profileMap[post.platform] = event.target.value || null;
+    setStatus(`Profil-Mapping für ${post.platform} gespeichert.`);
+  });
+
+  const publishViaBuffer = async (scheduledAt = null) => {
+    const mappedProfileId = state.buffer.profileMap[post.platform];
+    if (!mappedProfileId) return setStatus(`Kein Buffer-Profil für ${post.platform} gemappt.`);
+    const selectedVariant = post.variants.find((v) => v.is_selected) ?? post.variants[0];
+    const media = post.hasImage ? [{ url: 'https://picsum.photos/1080/1080.jpg', mime_type: 'image/jpeg', width: 1080, height: 1080 }] : [];
+    const { data, error } = await supabase.functions.invoke('publish-via-buffer', {
+      body: {
+        post_id: post.id,
+        buffer_profile_id: mappedProfileId,
+        text: selectedVariant?.text ?? post.title,
+        media,
+        scheduled_at: scheduledAt,
+      },
+    });
+    if (error) return setStatus(`publish-via-buffer Fehler: ${error.message}`);
+    state.buffer.debug = {
+      provider: 'buffer',
+      buffer_update_id: data?.buffer_update_id,
+      attempts: 1,
+      last_error: null,
+    };
+    setStatus(`publish-via-buffer gestartet (${scheduledAt ? 'geplant' : 'sofort'}).`);
+    renderLayout(StudioView());
+    bindStudioEvents();
+  };
+
+  document.getElementById('buffer-publish-now')?.addEventListener('click', async () => publishViaBuffer(null));
+  document.getElementById('buffer-publish-scheduled')?.addEventListener('click', async () => publishViaBuffer(new Date(Date.now() + 15 * 60_000).toISOString()));
+
   document.getElementById('sort-hashtags')?.addEventListener('click', () => {
     const input = document.getElementById('hashtags-input').value;
     const tags = input.split(',').map((x) => x.trim()).filter(Boolean);
@@ -575,6 +686,7 @@ const renderView = async (viewName) => {
   if (!session) return;
 
   if (viewName === 'studio') {
+    await loadBufferState();
     renderLayout(StudioView());
     bindEvents(viewName, session);
     return;
