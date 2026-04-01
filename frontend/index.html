@@ -7,29 +7,32 @@
     <style>
       body { font-family: system-ui, sans-serif; margin: 0; background: #0f172a; color: #e2e8f0; }
       header { padding: 1rem; background: #1e293b; border-bottom: 1px solid #334155; }
-      nav { display: flex; gap: 0.5rem; }
+      nav { display: flex; gap: 0.5rem; flex-wrap: wrap; }
       button { background: #334155; color: #f8fafc; border: 1px solid #475569; border-radius: 8px; padding: 0.5rem 0.75rem; cursor: pointer; }
       button.active { background: #2563eb; border-color: #2563eb; }
+      button:disabled { opacity: 0.6; cursor: not-allowed; }
       main { padding: 1rem; }
       .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 1rem; margin-bottom: 1rem; }
       code { background: #0b1220; padding: 0.15rem 0.3rem; border-radius: 6px; }
       .muted { color: #94a3b8; }
-      input, textarea { margin: 0.35rem 0; padding: 0.5rem; border-radius: 6px; border: 1px solid #475569; background: #0b1220; color: #e2e8f0; width: 100%; }
-      .book-item { border-top: 1px solid #334155; padding-top: 1rem; margin-top: 1rem; }
-      .status-pill { display:inline-block; border-radius:999px; padding:0.1rem 0.6rem; font-size:0.75rem; border:1px solid #475569; }
-      .status-uploaded { background:#1d4ed8; }
-      .status-processing { background:#9333ea; }
-      .status-parsed { background:#166534; }
-      .status-failed { background:#b91c1c; }
+      input, textarea, select { margin: 0.35rem 0; padding: 0.5rem; border-radius: 6px; border: 1px solid #475569; background: #0b1220; color: #e2e8f0; width: 100%; box-sizing:border-box; }
+      .grid { display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fit,minmax(160px,1fr)); }
+      .toolbar { display:flex; gap:0.5rem; flex-wrap:wrap; align-items:end; }
+      .status-pill { display:inline-block; border-radius:999px; padding:0.1rem 0.6rem; font-size:0.75rem; border:1px solid #475569; text-transform: capitalize; }
       .inline-actions { display:flex; gap:0.5rem; flex-wrap:wrap; align-items:center; margin-top:0.5rem; }
+      .split { display:grid; grid-template-columns: 2fr 1fr; gap:1rem; }
+      .list-item { border-top:1px solid #334155; margin-top:0.75rem; padding-top:0.75rem; }
+      .hint { font-size:0.8rem; color:#a5b4fc; }
+      .danger { color:#fecaca; }
+      @media (max-width: 900px) { .split { grid-template-columns: 1fr; } }
     </style>
   </head>
   <body>
     <header>
       <h1>mkguy frontend shell</h1>
       <nav>
-        <button data-view="health" class="active">Health</button>
-        <button data-view="books">Bücher</button>
+        <button data-view="studio" class="active">Studio</button>
+        <button data-view="health">Health</button>
         <button data-view="login">Login</button>
       </nav>
     </header>
