@@ -45,6 +45,44 @@ Kurzer Smoke-Check nach jedem Deploy (oder nach Konfigurationsänderung):
    - `select public.list_dead_letter_jobs();`
    - CSV-Test: `select public.export_posts_csv();`
 
+## RLS + Erst-Daten (Onboarding) verifizieren
+Ziel: Sicherstellen, dass RLS aktiv bleibt und der kontrollierte Initial-Seed trotzdem nur im leeren System greift.
+
+1. **Mit authentifiziertem Owner/Editor testen**
+   - RLS bleibt aktiv, daher immer als eingeloggter User prüfen.
+   - Beispiel in SQL-Editor (mit JWT-Kontext) oder via App-Login + Frontend:
+     - `select auth.uid();` → darf nicht `null` sein.
+     - `select public.current_app_role();` → sollte `owner` oder `editor` sein.
+
+2. **Leeren Zustand prüfen**
+   - `select count(*) as books from public.books where deleted_at is null;`
+   - `select count(*) as campaigns from public.campaigns where deleted_at is null;`
+   - `select count(*) as posts from public.posts where deleted_at is null;`
+   - Erwartung vor Onboarding-Test: alle drei Counts = `0`.
+
+3. **Kontrollierten Seed manuell auslösen**
+   - Development:
+     - `select public.ensure_initial_seed('dev');`
+   - Produktion:
+     - `select public.ensure_initial_seed('prod');`
+   - Erwartung:
+     - Rückgabe enthält `"seeded": true` und `"inserted"` mit mindestens `books=1`, `campaigns=1`, `posts=1`.
+     - Optional auch `utm_profiles=1` (wenn Tabelle vorhanden/aktiv genutzt).
+
+4. **Idempotenz prüfen (kein Doppel-Seed)**
+   - Funktion direkt erneut ausführen:
+     - `select public.ensure_initial_seed('dev');`
+   - Erwartung:
+     - `"seeded": false`
+     - `"existing_before"` zeigt bereits vorhandene Datensätze.
+
+5. **RLS weiterhin wirksam prüfen**
+   - Mit einem User ohne Schreibrechte (z. B. `viewer`) testen:
+     - `select public.ensure_initial_seed('prod');`
+   - Erwartung:
+     - Fehler wegen fehlender Rolle (`insufficient_role_for_seed`) oder RLS-Block.
+   - Damit ist bestätigt: Seed umgeht keine Rollen-/RLS-Regeln.
+
 ## Deploy-Run (Reihenfolge + Rollback)
 
 ### Empfohlene Reihenfolge (Prod)

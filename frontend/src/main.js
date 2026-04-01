@@ -254,6 +254,23 @@ const loadPostsFromDb = async () => {
   state.selectedId = state.posts.some((post) => post.id === state.selectedId) ? state.selectedId : getFallbackSelectedId();
 };
 
+const runInitialOnboardingSeed = async () => {
+  try {
+    const { data, error } = await supabase.rpc('ensure_initial_seed', {
+      p_env: PUBLIC_CONFIG.APP_ENV,
+    });
+    if (error) {
+      logger.warn('initial_onboarding_seed_failed', { message: error.message });
+      return;
+    }
+    if (data?.seeded) {
+      logger.info('initial_onboarding_seed_created', data);
+    }
+  } catch (error) {
+    logger.warn('initial_onboarding_seed_failed', { message: error.message });
+  }
+};
+
 const canTransition = (current, target) => TRANSITIONS[current]?.includes(target);
 
 const getPreApprovalChecks = (post) => {
@@ -1249,6 +1266,7 @@ const renderView = async (viewName) => {
   }
 
   if (viewName === 'studio') {
+    await runInitialOnboardingSeed();
     try {
       await loadPostsFromDb();
     } catch (error) {
