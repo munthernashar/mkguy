@@ -25,8 +25,11 @@
       .hint { font-size:0.8rem; color:#a5b4fc; }
       .danger { color:#fecaca; }
       .calendar-conflict { border-left: 3px solid #f87171; padding-left: 0.75rem; }
+      .banner { border: 1px solid #7f1d1d; background: #3f1b1b; border-radius: 10px; padding: 0.75rem; margin-bottom: 0.75rem; }
+      .banner h4 { margin: 0 0 0.25rem 0; }
+      .ops-layout { display:grid; grid-template-columns: 1.4fr 1fr; gap:1rem; }
       input[type="checkbox"] { width: auto; margin-right: 0.35rem; }
-      @media (max-width: 900px) { .split { grid-template-columns: 1fr; } }
+      @media (max-width: 900px) { .split, .ops-layout { grid-template-columns: 1fr; } }
     </style>
   </head>
   <body>
@@ -34,6 +37,7 @@
       <h1>mkguy frontend shell</h1>
       <nav>
         <button data-view="studio" class="active">Studio</button>
+        <button data-view="ops">Ops</button>
         <button data-view="health">Health</button>
         <button data-view="login">Login</button>
       </nav>
