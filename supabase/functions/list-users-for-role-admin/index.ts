@@ -111,8 +111,13 @@ Deno.serve(async (request) => {
       });
     }
 
-    const emailByUserId = users.reduce<Record<string, string | null>>((acc, entry) => {
-      acc[entry.id] = entry.email;
+    const roleByUserId = (roles ?? []).reduce<Record<string, string>>((acc, entry) => {
+      acc[entry.user_id] = entry.role;
+      return acc;
+    }, {});
+
+    const roleSortDateByUserId = (roles ?? []).reduce<Record<string, string>>((acc, entry) => {
+      acc[entry.user_id] = entry.updated_at ?? entry.created_at ?? '';
       return acc;
     }, {});
 
@@ -121,20 +126,30 @@ Deno.serve(async (request) => {
       return acc;
     }, {});
 
-    const result = (roles ?? [])
+    const authUserIndexById = users.reduce<Record<string, number>>((acc, entry, index) => {
+      acc[entry.id] = index;
+      return acc;
+    }, {});
+
+    const result = users
       .map((entry) => ({
-        user_id: entry.user_id,
-        email: emailByUserId[entry.user_id] ?? null,
-        display_name: displayNameByUserId[entry.user_id] ?? null,
-        current_role: entry.role,
-        updated_at: entry.updated_at,
-        created_at: entry.created_at,
+        user_id: entry.id,
+        email: entry.email,
+        display_name: displayNameByUserId[entry.id] ?? null,
+        current_role: roleByUserId[entry.id] ?? null,
+        sort_date: roleSortDateByUserId[entry.id] ?? '',
       }))
       .sort((a, b) => {
-        const aDate = a.updated_at ?? a.created_at ?? '';
-        const bDate = b.updated_at ?? b.created_at ?? '';
-        return bDate.localeCompare(aDate);
-      });
+        if (a.sort_date && b.sort_date) {
+          return b.sort_date.localeCompare(a.sort_date);
+        }
+
+        if (a.sort_date) return -1;
+        if (b.sort_date) return 1;
+
+        return (authUserIndexById[a.user_id] ?? 0) - (authUserIndexById[b.user_id] ?? 0);
+      })
+      .map(({ sort_date, ...entry }) => entry);
 
     return new Response(JSON.stringify({ ok: true, users: result }), {
       status: 200,
