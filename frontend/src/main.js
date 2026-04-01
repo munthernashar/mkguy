@@ -1221,14 +1221,16 @@ const OpsView = () => {
       <h3>Benutzer & Rollen</h3>
       <p class="muted">Nur Owner dürfen Rollen ändern. Änderungen werden über <code>set-user-role</code> ausgeführt.</p>
       ${state.currentRole !== 'owner' ? '<p class="muted">Keine Berechtigung zur Rollenverwaltung.</p>' : ''}
-      ${state.currentRole === 'owner' ? roleUsers.map((user) => `
+      ${state.currentRole === 'owner' ? roleUsers.map((user) => {
+        const label = [user.display_name, user.email].filter(Boolean).join(' • ') || user.user_id;
+        return `
         <div class="list-item">
-          <div><strong>${user.email ?? user.user_id}</strong></div>
+          <div><strong>${escapeHtml(label)}</strong></div>
           <div class="muted">user_id: <code>${user.user_id}</code></div>
           <div class="inline-actions">
-            <span>Aktuelle Rolle: <code>${user.role}</code></span>
+            <span>Aktuelle Rolle: <code>${user.current_role}</code></span>
             <select data-user-role-select="${user.user_id}">
-              ${['owner', 'editor', 'viewer'].map((roleOption) => `<option value="${roleOption}" ${user.role === roleOption ? 'selected' : ''}>${roleOption}</option>`).join('')}
+              ${['owner', 'editor', 'viewer'].map((roleOption) => `<option value="${roleOption}" ${user.current_role === roleOption ? 'selected' : ''}>${roleOption}</option>`).join('')}
             </select>
             <button data-user-role-save="${user.user_id}">Rolle setzen</button>
           </div>
@@ -1237,7 +1239,8 @@ const OpsView = () => {
             ${(roleAuditLogsByUser[user.user_id] ?? []).map((entry) => `<div class="muted">${new Date(entry.created_at).toLocaleString()} • ${entry.action} • actor: ${entry.actor_user_id ?? 'system'} • details: ${JSON.stringify(entry.details ?? {})}</div>`).join('') || '<p class="muted">Keine Änderungen protokolliert.</p>'}
           </div>
         </div>
-      `).join('') || '<p class="muted">Keine Benutzer in user_roles gefunden.</p>' : ''}
+      `;
+      }).join('') || '<p class="muted">Keine Benutzer in user_roles gefunden.</p>' : ''}
     </section>
     <section class="card">
       <h3>Admin Settings (Owner only)</h3>
@@ -1605,11 +1608,16 @@ const loadRoleManagement = async () => {
 
   if (state.currentRole !== 'owner') return;
 
-  const { data: roles, error: roleError } = await supabase
-    .from('user_roles')
-    .select('user_id, role, updated_at, created_at')
-    .order('updated_at', { ascending: false });
-  if (roleError) throw new Error(`Benutzerrollen konnten nicht geladen werden: ${roleError.message}`);
+  const { data: roleUsersData, error: roleUsersError } = await supabase.functions.invoke('list-users-for-role-admin', {
+    body: {},
+  });
+  if (roleUsersError) {
+    const rawMessage = String(roleUsersError.message ?? roleUsersError);
+    throw new Error(`Benutzerrollen konnten nicht geladen werden: ${rawMessage}`);
+  }
+  if (roleUsersData?.ok === false) {
+    throw new Error(`Benutzerrollen konnten nicht geladen werden: ${roleUsersData.error ?? 'operation_failed'}`);
+  }
 
   const { data: auditLogs, error: logError } = await supabase
     .from('audit_logs')
@@ -1620,10 +1628,13 @@ const loadRoleManagement = async () => {
     .limit(500);
   if (logError) throw new Error(`Änderungsverlauf konnte nicht geladen werden: ${logError.message}`);
 
-  const users = roles ?? [];
-  state.roleManagement.users = users.map((entry) => ({
-    ...entry,
-    email: null,
+  state.roleManagement.users = (roleUsersData?.users ?? []).map((entry) => ({
+    user_id: entry.user_id,
+    email: entry.email ?? null,
+    display_name: entry.display_name ?? null,
+    current_role: entry.current_role,
+    updated_at: entry.updated_at,
+    created_at: entry.created_at,
   }));
   state.roleManagement.auditLogsByUser = (auditLogs ?? []).reduce((acc, entry) => {
     const key = entry.entity_id;
