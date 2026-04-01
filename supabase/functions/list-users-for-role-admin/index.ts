@@ -96,7 +96,7 @@ Deno.serve(async (request) => {
     const userIds = users.map((entry) => entry.id);
 
     const { data: roles, error: rolesError } = userIds.length > 0
-      ? await admin.from('user_roles').select('user_id, role, updated_at, created_at').in('user_id', userIds)
+      ? await admin.from('user_roles').select('user_id, role').in('user_id', userIds)
       : { data: [], error: null };
     if (rolesError) {
       log('error', 'list_users_for_role_admin_join_failed', {
@@ -119,13 +119,8 @@ Deno.serve(async (request) => {
       });
     }
 
-    const roleByUserId = (roles ?? []).reduce<Record<string, string>>((acc, entry) => {
+    const currentRoleByUserId = (roles ?? []).reduce<Record<string, string>>((acc, entry) => {
       acc[entry.user_id] = entry.role;
-      return acc;
-    }, {});
-
-    const roleSortDateByUserId = (roles ?? []).reduce<Record<string, string>>((acc, entry) => {
-      acc[entry.user_id] = entry.updated_at ?? entry.created_at ?? '';
       return acc;
     }, {});
 
@@ -134,30 +129,12 @@ Deno.serve(async (request) => {
       return acc;
     }, {});
 
-    const authUserIndexById = users.reduce<Record<string, number>>((acc, entry, index) => {
-      acc[entry.id] = index;
-      return acc;
-    }, {});
-
-    const result = users
-      .map((entry) => ({
-        user_id: entry.id,
-        email: entry.email,
-        display_name: displayNameByUserId[entry.id] ?? null,
-        current_role: roleByUserId[entry.id] ?? null,
-        sort_date: roleSortDateByUserId[entry.id] ?? '',
-      }))
-      .sort((a, b) => {
-        if (a.sort_date && b.sort_date) {
-          return b.sort_date.localeCompare(a.sort_date);
-        }
-
-        if (a.sort_date) return -1;
-        if (b.sort_date) return 1;
-
-        return (authUserIndexById[a.user_id] ?? 0) - (authUserIndexById[b.user_id] ?? 0);
-      })
-      .map(({ sort_date, ...entry }) => entry);
+    const result = users.map((entry) => ({
+      user_id: entry.id,
+      email: entry.email,
+      display_name: displayNameByUserId[entry.id] ?? null,
+      current_role: currentRoleByUserId[entry.id] ?? null,
+    }));
 
     return new Response(JSON.stringify({ ok: true, users: result }), {
       status: 200,
