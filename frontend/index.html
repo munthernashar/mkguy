@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>mkguy shell app</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 0; background: #0f172a; color: #e2e8f0; }
+      header { padding: 1rem; background: #1e293b; border-bottom: 1px solid #334155; }
+      nav { display: flex; gap: 0.5rem; }
+      button { background: #334155; color: #f8fafc; border: 1px solid #475569; border-radius: 8px; padding: 0.5rem 0.75rem; cursor: pointer; }
+      button.active { background: #2563eb; border-color: #2563eb; }
+      main { padding: 1rem; }
+      .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 1rem; margin-bottom: 1rem; }
+      code { background: #0b1220; padding: 0.15rem 0.3rem; border-radius: 6px; }
+      .muted { color: #94a3b8; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>mkguy frontend shell</h1>
+      <nav>
+        <button data-view="health" class="active">Health</button>
+        <button data-view="login">Login</button>
+      </nav>
+    </header>
+    <main id="app"></main>
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>
