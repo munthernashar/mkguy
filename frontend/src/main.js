@@ -204,6 +204,12 @@ const hasRolePermission = (action) => {
   return editorPermissions.includes(action);
 };
 
+const getFallbackSelectedId = (removedId = null) => {
+  const remainingPosts = removedId ? state.posts.filter((post) => post.id !== removedId) : state.posts;
+  if (!remainingPosts.length) return null;
+  return remainingPosts[0].id;
+};
+
 const statusPill = (status) => `<span class="status-pill">${status}</span>`;
 
 const LoginView = () => `
@@ -301,6 +307,7 @@ const StudioView = () => {
             <div class="muted">${post.section} • ${post.book} • ${post.campaign} • ${post.platform} • ${post.language}</div>
             <div class="inline-actions">
               <button data-open="${post.id}">Öffnen</button>
+              <button data-archive="${post.id}">Archivieren</button>
               <span class="muted">Tags: ${post.tags.join(', ')}</span>
             </div>
           </div>
@@ -343,6 +350,8 @@ const StudioView = () => {
       <h4>Workflow</h4>
       <div class="inline-actions">
         ${WORKFLOW_STATUSES.filter((s) => s !== selected.status).map((status) => `<button data-transition="${status}">${status}</button>`).join('')}
+        <button data-archive="${selected.id}">Archivieren</button>
+        <button data-delete="${selected.id}">Löschen</button>
       </div>
       <p class="muted">Erlaubte Folgestati von <code>${selected.status}</code>: ${(TRANSITIONS[selected.status] || []).join(', ') || 'keine'}</p>
 
@@ -602,6 +611,37 @@ const bindStudioEvents = () => {
     });
   });
 
+  document.querySelectorAll('[data-archive]').forEach((button) => {
+    button.addEventListener('click', () => {
+      if (!hasRolePermission('archive')) return setStatus('Nur owner darf archivieren.');
+      const postToArchive = state.posts.find((item) => item.id === button.dataset.archive);
+      if (!postToArchive) return setStatus('Post wurde nicht gefunden.');
+      if (postToArchive.status === 'archived') return setStatus('Post ist bereits archiviert.');
+      postToArchive.status = 'archived';
+      state.selectedId = postToArchive.id;
+      setStatus(`Post "${postToArchive.title}" archiviert.`);
+      renderLayout(StudioView());
+      bindStudioEvents();
+    });
+  });
+
+  document.querySelectorAll('[data-delete]').forEach((button) => {
+    button.addEventListener('click', () => {
+      if (!hasRolePermission('delete')) return setStatus('Nur owner darf löschen.');
+      if (state.posts.length <= 1) return setStatus('Mindestens ein Post muss bestehen bleiben.');
+      const postId = button.dataset.delete;
+      const postToDelete = state.posts.find((item) => item.id === postId);
+      if (!postToDelete) return setStatus('Post wurde nicht gefunden.');
+      const confirmed = window.confirm(`Post "${postToDelete.title}" wirklich endgültig löschen?`);
+      if (!confirmed) return;
+      state.posts = state.posts.filter((item) => item.id !== postId);
+      state.selectedId = getFallbackSelectedId(postId);
+      setStatus(`Post "${postToDelete.title}" gelöscht.`);
+      renderLayout(StudioView());
+      bindStudioEvents();
+    });
+  });
+
   document.getElementById('create-post')?.addEventListener('click', () => {
     const newPost = {
       id: createPostId(),
@@ -685,7 +725,7 @@ const bindStudioEvents = () => {
       if (target === 'scheduled' && post.status !== 'approved') {
         return setStatus('Nur approved darf geplant werden.');
       }
-      if (['scheduled', 'publishing', 'posted'].includes(target) && state.role !== 'owner') {
+      if (['scheduled', 'publishing', 'posted'].includes(target) && !hasRolePermission('publish')) {
         return setStatus('Scheduling/Publishing nur für owner erlaubt.');
       }
       post.status = target;
