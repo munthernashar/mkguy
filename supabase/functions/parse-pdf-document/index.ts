@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createClient } from 'npm:@supabase/supabase-js@2.49.8';
+import mammoth from 'npm:mammoth@1.8.0';
 import pdf from 'npm:pdf-parse@1.1.1';
 import { buildCorsHeaders } from '../_shared/cors.ts';
 import { log } from '../_shared/logger.ts';
@@ -10,6 +11,16 @@ const MIN_TEXT_LENGTH = 1200;
 const CHUNK_MIN = 1500;
 const CHUNK_MAX = 2500;
 const INSERT_BATCH_SIZE = 50;
+
+class ParseError extends Error {
+  code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.code = code;
+    this.name = 'ParseError';
+  }
+}
 
 const sha256 = (input: string | Uint8Array) => createHash('sha256').update(input).digest('hex');
 const normalizeText = (value: string) =>
@@ -44,6 +55,19 @@ const splitChunks = (text: string) => {
 const json = (payload: unknown, status: number, corsHeaders: Record<string, string>) =>
   new Response(JSON.stringify(payload), { status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 
+const detectDocumentType = (fileName: string | null, mimeType: string | null): 'pdf' | 'docx' | 'doc' | null => {
+  const normalizedName = (fileName ?? '').toLowerCase();
+  const normalizedMime = (mimeType ?? '').toLowerCase();
+
+  if (normalizedMime === 'application/pdf' || normalizedName.endsWith('.pdf')) return 'pdf';
+  if (
+    normalizedMime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    || normalizedName.endsWith('.docx')
+  ) return 'docx';
+  if (normalizedMime === 'application/msword' || normalizedName.endsWith('.doc')) return 'doc';
+  return null;
+};
+
 Deno.serve(async (request) => {
   const origin = request.headers.get('origin');
   const corsHeaders = buildCorsHeaders(origin);
@@ -59,7 +83,7 @@ Deno.serve(async (request) => {
 
     const { data: document, error: docError } = await supabase
       .from('book_documents')
-      .select('id, book_id, source_uri, file_name, parse_status, created_by')
+      .select('id, book_id, source_uri, source_type, file_name, mime_type, parse_status, created_by')
       .eq('id', payload.document_id)
       .single();
 
@@ -69,7 +93,7 @@ Deno.serve(async (request) => {
     if (!bucketPath) throw new Error('parse_error: source_uri fehlt für Dokument.');
 
     const { data: fileBlob, error: dlError } = await supabase.storage.from('book-pdfs').download(bucketPath);
-    if (dlError || !fileBlob) throw new Error(`parse_error: PDF konnte nicht geladen werden (${dlError?.message ?? 'unknown'}).`);
+    if (dlError || !fileBlob) throw new ParseError('storage_download_failed', `Datei konnte nicht geladen werden (${dlError?.message ?? 'unknown'}).`);
 
     const fileBytes = new Uint8Array(await fileBlob.arrayBuffer());
     const fileHash = sha256(fileBytes);
@@ -83,23 +107,58 @@ Deno.serve(async (request) => {
         .neq('id', document.id)
         .is('deleted_at', null)
         .maybeSingle();
-      if (duplicate) throw new Error(`parse_error: Duplikat erkannt (SHA256 bereits in Dokument ${duplicate.id}).`);
+      if (duplicate) {
+        throw new ParseError('duplicate_document', `Duplikat erkannt (SHA256 bereits in Dokument ${duplicate.id}).`);
+      }
     }
 
-    const parsed = await pdf(Buffer.from(fileBytes));
-    const cleanedText = normalizeText(parsed.text ?? '');
-    const isLikelyImagePdf = cleanedText.length < 300 || ((parsed.numpages ?? 1) > 0 && cleanedText.length / (parsed.numpages ?? 1) < 90);
+    const documentType = detectDocumentType(document.file_name ?? null, document.mime_type ?? null);
+    if (!documentType) {
+      throw new ParseError(
+        'unsupported_document_type',
+        'Dokumenttyp nicht unterstützt. Erlaubt sind PDF und DOCX. Für DOC bitte zuerst in DOCX oder PDF konvertieren.',
+      );
+    }
 
-    if (isLikelyImagePdf) {
-      throw new Error('parse_error: PDF wirkt bildbasiert. Bitte OCR durchführen und erneut hochladen.');
+    if (documentType === 'doc') {
+      throw new ParseError(
+        'unsupported_document_type',
+        'Legacy DOC wird nicht direkt unterstützt. Bitte Datei vor dem Upload in DOCX oder PDF konvertieren.',
+      );
+    }
+
+    let cleanedText = '';
+    let extractionMetadata: Record<string, unknown> = { document_type: documentType };
+
+    if (documentType === 'pdf') {
+      const parsed = await pdf(Buffer.from(fileBytes));
+      cleanedText = normalizeText(parsed.text ?? '');
+      const isLikelyImagePdf = cleanedText.length < 300
+        || ((parsed.numpages ?? 1) > 0 && cleanedText.length / (parsed.numpages ?? 1) < 90);
+
+      if (isLikelyImagePdf) {
+        throw new ParseError('pdf_image_based', 'PDF wirkt bildbasiert. Bitte OCR durchführen und erneut hochladen.');
+      }
+
+      extractionMetadata = {
+        ...extractionMetadata,
+        numpages: parsed.numpages,
+      };
+    } else if (documentType === 'docx') {
+      const extracted = await mammoth.extractRawText({ buffer: Buffer.from(fileBytes) });
+      cleanedText = normalizeText(extracted.value ?? '');
+      extractionMetadata = {
+        ...extractionMetadata,
+        warnings: extracted.messages ?? [],
+      };
     }
 
     if (cleanedText.length < MIN_TEXT_LENGTH) {
-      throw new Error(`parse_error: Zu wenig extrahierter Text (${cleanedText.length} Zeichen, Minimum ${MIN_TEXT_LENGTH}).`);
+      throw new ParseError('text_too_short', `Zu wenig extrahierter Text (${cleanedText.length} Zeichen, Minimum ${MIN_TEXT_LENGTH}).`);
     }
 
     const chunks = splitChunks(cleanedText);
-    if (!chunks.length) throw new Error('parse_error: Keine verwertbaren Text-Chunks erzeugt.');
+    if (!chunks.length) throw new ParseError('chunking_failed', 'Keine verwertbaren Text-Chunks erzeugt.');
 
     await supabase.from('book_document_chunks').delete().eq('document_id', document.id);
 
@@ -109,11 +168,11 @@ Deno.serve(async (request) => {
         chunk_index: start + offset,
         content,
         token_count: Math.ceil(content.length / 4),
-        metadata: { source: 'pdf', batch: Math.floor(start / INSERT_BATCH_SIZE) },
+        metadata: { source: documentType, batch: Math.floor(start / INSERT_BATCH_SIZE) },
       }));
 
       const { error: insertError } = await supabase.from('book_document_chunks').insert(batch);
-      if (insertError) throw new Error(`parse_error: Chunk-Speicherung fehlgeschlagen (${insertError.message}).`);
+      if (insertError) throw new ParseError('chunk_insert_failed', `Chunk-Speicherung fehlgeschlagen (${insertError.message}).`);
     }
 
     await supabase
@@ -125,7 +184,7 @@ Deno.serve(async (request) => {
         parsed_at: new Date().toISOString(),
         document_metadata: {
           extraction: {
-            numpages: parsed.numpages,
+            ...extractionMetadata,
             chunk_count: chunks.length,
             text_length: cleanedText.length,
           },
@@ -151,19 +210,20 @@ Deno.serve(async (request) => {
     return json({ ok: true, document_id: document.id, chunks: chunks.length }, 200, corsHeaders);
   } catch (error) {
     const body = (await request.clone().json().catch(() => ({}))) as ParseRequest;
+    const parseErrorCode = error instanceof ParseError ? error.code : String(error).slice(0, 500);
     if (body.document_id) {
       await supabase
         .from('book_documents')
-        .update({ parse_status: 'failed', parse_error: String(error).slice(0, 500) })
+        .update({ parse_status: 'failed', parse_error: parseErrorCode })
         .eq('id', body.document_id);
     }
     if (body.job_id) {
       await supabase
         .from('generation_jobs')
-        .update({ status: 'failed', error_message: String(error).slice(0, 500), completed_at: new Date().toISOString() })
+        .update({ status: 'failed', error_message: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500), completed_at: new Date().toISOString() })
         .eq('id', body.job_id);
     }
     log('error', 'parse_pdf_document_failed', { error: String(error), documentId: body.document_id });
-    return json({ ok: false, error: String(error) }, 422, corsHeaders);
+    return json({ ok: false, error: parseErrorCode }, 422, corsHeaders);
   }
 });
