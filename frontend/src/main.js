@@ -128,6 +128,13 @@ const state = {
   mediaLibrary: {
     assets: [],
   },
+  kpi: {
+    widgets: {},
+    timeseries: [],
+    variantPerformance: [],
+    range: { from: null, to: null },
+    loadingError: null,
+  },
   pdfWorkspace: {
     books: [],
     documents: [],
@@ -246,6 +253,25 @@ const state = {
       hashtags: ['#brand', '#toneofvoice'],
     },
   ],
+};
+
+const ensureKpiState = () => {
+  if (!state.kpi) {
+    state.kpi = {
+      widgets: {},
+      timeseries: [],
+      variantPerformance: [],
+      range: { from: null, to: null },
+      loadingError: null,
+    };
+    return state.kpi;
+  }
+  state.kpi.widgets = state.kpi.widgets ?? {};
+  state.kpi.timeseries = Array.isArray(state.kpi.timeseries) ? state.kpi.timeseries : [];
+  state.kpi.variantPerformance = Array.isArray(state.kpi.variantPerformance) ? state.kpi.variantPerformance : [];
+  state.kpi.range = state.kpi.range ?? { from: null, to: null };
+  state.kpi.loadingError = state.kpi.loadingError ?? null;
+  return state.kpi;
 };
 
 const LOCAL_SEED_POSTS = state.posts.map((post) => ({ ...post, variants: post.variants.map((variant) => ({ ...variant })) }));
@@ -1310,12 +1336,28 @@ const OpsView = () => {
 };
 
 const DashboardView = () => {
-  const widgets = state.kpi.widgets ?? {};
-  const topCtr = widgets.top_ctr_posts ?? [];
-  const platformComparison = widgets.platform_comparison ?? [];
-  const underperformers = widgets.underperformers ?? [];
-  const timeseries = state.kpi.timeseries ?? [];
-  const variantRows = state.kpi.variantPerformance ?? [];
+  const kpiState = ensureKpiState();
+  const widgets = kpiState.widgets ?? {};
+  const topCtr = (widgets.top_ctr_posts ?? []).filter((entry) => entry && typeof entry === 'object');
+  const platformComparison = (widgets.platform_comparison ?? []).filter((entry) => entry && typeof entry === 'object');
+  const underperformers = (widgets.underperformers ?? []).filter((entry) => entry && typeof entry === 'object');
+  const timeseries = (kpiState.timeseries ?? []).filter((entry) => entry && typeof entry === 'object');
+  const variantRows = (kpiState.variantPerformance ?? []).filter((entry) => entry && typeof entry === 'object');
+  const hasRenderableData = Array.isArray(topCtr)
+    && Array.isArray(platformComparison)
+    && Array.isArray(underperformers)
+    && Array.isArray(timeseries)
+    && Array.isArray(variantRows);
+  if (!hasRenderableData) {
+    return `
+      <section class="card">
+        <h2>KPI Dashboard</h2>
+        <div class="inline-actions"><button id="refresh-dashboard">Dashboard aktualisieren</button></div>
+        <p class="muted">Dashboard-Daten sind aktuell nicht verfügbar. Bitte neu laden.</p>
+      </section>
+      <p id="dashboard-status" class="muted">${kpiState.loadingError ? `Fehler: ${escapeHtml(kpiState.loadingError)}` : ''}</p>
+    `;
+  }
   const variantByPost = variantRows.reduce((acc, row) => {
     acc[row.post_id] = acc[row.post_id] ?? { title: row.title, platform: row.platform, rows: [] };
     acc[row.post_id].rows.push(row);
@@ -1370,7 +1412,7 @@ const DashboardView = () => {
   }).join('') || '<p class="muted">Keine Variantenmetriken vorhanden.</p>'}
     </section>
 
-    <p id="dashboard-status" class="muted">${state.kpi.loadingError ? `Fehler: ${escapeHtml(state.kpi.loadingError)}` : ''}</p>
+    <p id="dashboard-status" class="muted">${kpiState.loadingError ? `Fehler: ${escapeHtml(kpiState.loadingError)}` : ''}</p>
   `;
 };
 
@@ -1549,26 +1591,27 @@ const loadCampaignWorkspace = async () => {
 };
 
 const loadKpiDashboard = async () => {
+  const kpiState = ensureKpiState();
   const to = new Date();
   const from = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-  state.kpi.range = { from: from.toISOString().slice(0, 10), to: to.toISOString().slice(0, 10) };
-  state.kpi.loadingError = null;
+  kpiState.range = { from: from.toISOString().slice(0, 10), to: to.toISOString().slice(0, 10) };
+  kpiState.loadingError = null;
 
   const { data: widgets, error: widgetError } = await supabase.rpc('dashboard_widgets', {
-    p_from: state.kpi.range.from,
-    p_to: state.kpi.range.to,
+    p_from: kpiState.range.from,
+    p_to: kpiState.range.to,
     p_book_id: null,
     p_campaign_id: null,
     p_platform: null,
   });
   if (widgetError) throw widgetError;
-  state.kpi.widgets = widgets ?? {};
+  kpiState.widgets = widgets ?? {};
 
   const { data: metricRows, error: metricError } = await supabase
     .from('post_metrics')
     .select('metric_date, impressions, clicks, interactions')
-    .gte('metric_date', state.kpi.range.from)
-    .lte('metric_date', state.kpi.range.to)
+    .gte('metric_date', kpiState.range.from)
+    .lte('metric_date', kpiState.range.to)
     .order('metric_date', { ascending: true });
   if (metricError) throw metricError;
 
@@ -1581,7 +1624,7 @@ const loadKpiDashboard = async () => {
     acc[key] = current;
     return acc;
   }, {});
-  state.kpi.timeseries = Object.values(timeseriesMap).map((row) => ({
+  kpiState.timeseries = Object.values(timeseriesMap).map((row) => ({
     ...row,
     ctr: row.impressions > 0 ? (row.clicks * 100) / row.impressions : 0,
     engagement_rate: row.impressions > 0 ? (row.interactions * 100) / row.impressions : 0,
@@ -1599,7 +1642,7 @@ const loadKpiDashboard = async () => {
     acc[variant.id] = variant.metadata?.name ?? 'A';
     return acc;
   }, {});
-  state.kpi.variantPerformance = (variantRows ?? []).map((row) => ({
+  kpiState.variantPerformance = (variantRows ?? []).map((row) => ({
     ...row,
     variant_name: variantNameById[row.post_variant_id] ?? 'A',
   }));
@@ -3101,7 +3144,8 @@ const renderView = async (viewName) => {
     try {
       await loadKpiDashboard();
     } catch (error) {
-      state.kpi.loadingError = error.message;
+      const kpiState = ensureKpiState();
+      kpiState.loadingError = error.message;
     }
     renderLayout(DashboardView());
     bindEvents(viewName, session);
