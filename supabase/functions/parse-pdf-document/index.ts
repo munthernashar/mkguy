@@ -68,6 +68,18 @@ const detectDocumentType = (fileName: string | null, mimeType: string | null): '
   return null;
 };
 
+const mimeTypeForDocumentType = (documentType: 'pdf' | 'docx' | 'doc') => {
+  if (documentType === 'pdf') return 'application/pdf';
+  if (documentType === 'docx') return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  return 'application/msword';
+};
+
+const sourceTypeForDocumentType = (documentType: 'pdf' | 'docx' | 'doc') => {
+  if (documentType === 'pdf') return 'upload_pdf';
+  if (documentType === 'docx') return 'upload_docx';
+  return 'upload_doc';
+};
+
 Deno.serve(async (request) => {
   const origin = request.headers.get('origin');
   const corsHeaders = buildCorsHeaders(origin);
@@ -116,13 +128,21 @@ Deno.serve(async (request) => {
     if (!documentType) {
       throw new ParseError(
         'unsupported_document_type',
-        'Dokumenttyp nicht unterstützt. Erlaubt sind PDF und DOCX. Für DOC bitte zuerst in DOCX oder PDF konvertieren.',
+        'Dokumenttyp nicht unterstützt. Erlaubt sind PDF, DOCX und DOC.',
       );
     }
 
+    await supabase
+      .from('book_documents')
+      .update({
+        mime_type: mimeTypeForDocumentType(documentType),
+        source_type: sourceTypeForDocumentType(documentType),
+      })
+      .eq('id', document.id);
+
     if (documentType === 'doc') {
       throw new ParseError(
-        'unsupported_document_type',
+        'unsupported_legacy_doc',
         'Legacy DOC wird nicht direkt unterstützt. Bitte Datei vor dem Upload in DOCX oder PDF konvertieren.',
       );
     }
