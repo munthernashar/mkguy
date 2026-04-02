@@ -70,6 +70,8 @@ const DOCUMENT_MIME_TYPES = {
   docx: ['application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
 };
 
+const canonicalMimeTypeForDocumentType = (documentType) => DOCUMENT_MIME_TYPES[documentType]?.[0] ?? 'application/octet-stream';
+
 const detectDocumentType = (file) => {
   const lowerName = (file?.name ?? '').toLowerCase();
   const mimeType = (file?.type ?? '').toLowerCase();
@@ -826,7 +828,7 @@ const StudioView = () => {
       </div>
       ${!selectedBook ? '<p class="muted">Lege zuerst ein Buch an, um PDFs hochzuladen.</p>' : `
         <form id="pdf-upload-form" class="inline-actions">
-          <input id="pdf-file" type="file" accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" required />
+          <input id="pdf-file" type="file" accept=".pdf,.doc,.docx" required />
           <button type="submit">Dokument in Storage-Bucket hochladen</button>
         </form>
       `}
@@ -2070,7 +2072,7 @@ const bindStudioEvents = () => {
       if (!documentType) {
         return setStatus('Nicht unterstützter Dokumenttyp. Bitte PDF, DOCX oder DOC auswählen.');
       }
-      const mimeType = file.type || DOCUMENT_MIME_TYPES[documentType]?.[0] || 'application/octet-stream';
+      const mimeType = canonicalMimeTypeForDocumentType(documentType);
       const sanitizedFileName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, '_');
       const objectPath = `${selectedBookId}/${Date.now()}-${sanitizedFileName}`;
       const { error: uploadError } = await supabase.storage.from('book-pdfs').upload(objectPath, file, { contentType: mimeType });
