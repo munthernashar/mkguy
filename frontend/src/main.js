@@ -105,6 +105,8 @@ const TRANSITIONS = {
   archived: [],
 };
 
+const PDF_POLL_INTERVAL_MS = 4000;
+
 const state = {
   currentRole: null,
   filters: { book: 'all', campaign: 'all', platform: 'all', language: 'all', tag: 'all' },
@@ -163,6 +165,9 @@ const state = {
     books: [],
     documents: [],
     insights: [],
+    generationJobsByDocument: {},
+    localProcessingByDocument: {},
+    pollingTimersByDocument: {},
     selectedBookId: null,
   },
   campaignWorkspace: {
@@ -693,6 +698,55 @@ const AccessDeniedView = (session) => `
   </section>
 `;
 
+const getPdfGenerationJob = (documentId) => state.pdfWorkspace.generationJobsByDocument?.[documentId] ?? null;
+
+const getPdfUiState = (document, insight) => {
+  const parseStatus = document?.parse_status ?? 'uploaded';
+  const parseError = document?.parse_error ?? null;
+  const generationJob = getPdfGenerationJob(document?.id);
+  const generationStatus = generationJob?.status ?? null;
+  const localProcessing = Boolean(state.pdfWorkspace.localProcessingByDocument?.[document?.id]);
+
+  if (parseStatus === 'failed' || generationStatus === 'failed') {
+    return {
+      label: 'Fehler',
+      detail: parseError ?? generationJob?.error_message ?? 'Unbekannter Fehler.',
+      tone: 'danger',
+      busy: false,
+    };
+  }
+  if (localProcessing || parseStatus === 'processing' || (parseStatus === 'uploaded' && generationStatus === 'queued')) {
+    return {
+      label: 'Parsing läuft',
+      detail: 'Dokument wird verarbeitet.',
+      tone: 'muted',
+      busy: true,
+    };
+  }
+  if (parseStatus === 'parsed' && generationStatus !== 'completed' && !insight) {
+    return {
+      label: 'Insights werden generiert',
+      detail: 'Analyse abgeschlossen, Insights werden erstellt.',
+      tone: 'muted',
+      busy: true,
+    };
+  }
+  if (insight || generationStatus === 'completed') {
+    return {
+      label: 'Fertig',
+      detail: 'Insights sind verfügbar.',
+      tone: 'muted',
+      busy: false,
+    };
+  }
+  return {
+    label: 'Upload erfolgreich',
+    detail: 'Dokument wurde hochgeladen und wartet auf Analyse.',
+    tone: 'muted',
+    busy: false,
+  };
+};
+
 const StudioView = () => {
   const visiblePosts = state.posts.filter(applyFilters);
   const selected = getPost();
@@ -779,16 +833,20 @@ const StudioView = () => {
       <h4>Dokumentstatus</h4>
       ${bookDocuments.map((document) => {
     const insight = insightsByDocumentId[document.id];
+    const uiState = getPdfUiState(document, insight);
     return `
           <div class="list-item">
             <div><strong>${escapeHtml(document.file_name ?? 'Unbekanntes Dokument')}</strong> ${statusPill(document.parse_status ?? 'uploaded')}</div>
             <div class="muted">
               Status: <code>${document.parse_status ?? 'uploaded'}</code> • Typ: <code>${document.source_type ?? 'upload'}</code> • MIME: <code>${document.mime_type ?? 'unbekannt'}</code> • Hochgeladen: ${new Date(document.created_at).toLocaleString()}
             </div>
+            <div class="${uiState.tone === 'danger' ? 'danger' : 'muted'}">
+              ${escapeHtml(uiState.label)}${uiState.detail ? `: ${escapeHtml(uiState.detail)}` : ''}
+            </div>
             ${document.parse_error ? `<div class="danger">Parse-Fehler: ${escapeHtml(document.parse_error)}</div>` : ''}
             <div class="inline-actions">
-              <button data-start-analysis="${document.id}">Analyse starten</button>
-              <button data-reanalyze="${document.id}">Neu analysieren</button>
+              <button data-start-analysis="${document.id}" ${uiState.busy ? 'disabled' : ''}>Analyse starten</button>
+              <button data-reanalyze="${document.id}" ${uiState.busy ? 'disabled' : ''}>Neu analysieren</button>
             </div>
             ${insight ? `
               <div>
@@ -1468,9 +1526,29 @@ const loadPdfWorkspace = async (session) => {
     .limit(200);
   if (insightsError) throw new Error(`Insights konnten nicht geladen werden: ${insightsError.message}`);
 
+  const documentIds = (documents ?? []).map((document) => document.id).filter(Boolean);
+  let generationJobs = [];
+  if (documentIds.length > 0) {
+    const { data: jobs, error: jobsError } = await supabase
+      .from('generation_jobs')
+      .select('id, document_id, status, error_message, job_type, created_at, updated_at, completed_at')
+      .eq('job_type', 'pdf_insight')
+      .in('document_id', documentIds)
+      .order('created_at', { ascending: false })
+      .limit(400);
+    if (jobsError) throw new Error(`Generation-Jobs konnten nicht geladen werden: ${jobsError.message}`);
+    generationJobs = jobs ?? [];
+  }
+  const generationJobsByDocument = (generationJobs ?? []).reduce((acc, job) => {
+    if (!job.document_id) return acc;
+    if (!acc[job.document_id]) acc[job.document_id] = job;
+    return acc;
+  }, {});
+
   state.pdfWorkspace.books = books ?? [];
   state.pdfWorkspace.documents = documents ?? [];
   state.pdfWorkspace.insights = insights ?? [];
+  state.pdfWorkspace.generationJobsByDocument = generationJobsByDocument;
   if (!state.pdfWorkspace.selectedBookId || !state.pdfWorkspace.books.some((book) => book.id === state.pdfWorkspace.selectedBookId)) {
     state.pdfWorkspace.selectedBookId = state.pdfWorkspace.books[0]?.id ?? null;
   }
@@ -1875,6 +1953,53 @@ const bindStudioEvents = () => {
     }
     bindStudioEvents();
   };
+  const clearPdfPolling = (documentId) => {
+    const activeTimer = state.pdfWorkspace.pollingTimersByDocument[documentId];
+    if (activeTimer) {
+      clearTimeout(activeTimer);
+      delete state.pdfWorkspace.pollingTimersByDocument[documentId];
+    }
+  };
+  const stopPdfProcessingState = (documentId) => {
+    if (state.pdfWorkspace.localProcessingByDocument[documentId]) {
+      delete state.pdfWorkspace.localProcessingByDocument[documentId];
+    }
+    clearPdfPolling(documentId);
+  };
+  const renderStudioLocally = (statusMessage = null) => {
+    renderLayout(StudioView());
+    if (statusMessage) setStatus(statusMessage);
+    bindStudioEvents();
+  };
+  const startPdfPolling = async (documentId) => {
+    clearPdfPolling(documentId);
+    const poll = async () => {
+      try {
+        const session = await getSession();
+        await loadPdfWorkspace(session);
+        renderStudioLocally();
+        const document = state.pdfWorkspace.documents.find((entry) => entry.id === documentId);
+        const insight = state.pdfWorkspace.insights.find((entry) => entry.document_id === documentId);
+        const generationJob = getPdfGenerationJob(documentId);
+        const parseDone = ['parsed', 'failed'].includes(document?.parse_status ?? '');
+        const generationDone = ['completed', 'failed'].includes(generationJob?.status ?? '');
+        if ((parseDone && generationDone) || document?.parse_status === 'failed' || insight) {
+          stopPdfProcessingState(documentId);
+          if (document?.parse_status === 'failed' || generationJob?.status === 'failed') {
+            setStatus(`Analyse fehlgeschlagen: ${document?.parse_error ?? generationJob?.error_message ?? 'unknown_error'}`);
+          } else {
+            setStatus('Analyse abgeschlossen. Insights wurden aktualisiert.');
+          }
+          return;
+        }
+        state.pdfWorkspace.pollingTimersByDocument[documentId] = setTimeout(poll, PDF_POLL_INTERVAL_MS);
+      } catch (error) {
+        stopPdfProcessingState(documentId);
+        setStatus(`Status-Polling fehlgeschlagen: ${error.message}`);
+      }
+    };
+    await poll();
+  };
   const syncGenerationConfigFromUi = () => {
     post.generationConfig = {
       platform: document.getElementById('ai-platform')?.value ?? post.platform ?? 'linkedin',
@@ -1971,11 +2096,16 @@ const bindStudioEvents = () => {
     button.addEventListener('click', async () => {
       const documentId = button.dataset.startAnalysis;
       if (!documentId) return;
+      state.pdfWorkspace.localProcessingByDocument[documentId] = true;
+      renderStudioLocally('Upload erfolgreich. Parsing läuft …');
       const { data, error } = await supabase.functions.invoke('start-pdf-analysis', {
         body: { document_id: documentId, force: false },
       });
-      if (error || data?.ok === false) return setStatus(`Analyse starten fehlgeschlagen: ${error?.message ?? data?.error ?? 'unknown_error'}`);
-      await refreshStudio('Analyse wurde gestartet.');
+      if (error || data?.ok === false) {
+        stopPdfProcessingState(documentId);
+        return setStatus(`Analyse starten fehlgeschlagen: ${error?.message ?? data?.error ?? 'unknown_error'}`);
+      }
+      await startPdfPolling(documentId);
     });
   });
 
@@ -1983,11 +2113,16 @@ const bindStudioEvents = () => {
     button.addEventListener('click', async () => {
       const documentId = button.dataset.reanalyze;
       if (!documentId) return;
+      state.pdfWorkspace.localProcessingByDocument[documentId] = true;
+      renderStudioLocally('Upload erfolgreich. Parsing läuft …');
       const { data, error } = await supabase.functions.invoke('start-pdf-analysis', {
         body: { document_id: documentId, force: true },
       });
-      if (error || data?.ok === false) return setStatus(`Neu analysieren fehlgeschlagen: ${error?.message ?? data?.error ?? 'unknown_error'}`);
-      await refreshStudio('Neu-Analyse wurde gestartet.');
+      if (error || data?.ok === false) {
+        stopPdfProcessingState(documentId);
+        return setStatus(`Neu analysieren fehlgeschlagen: ${error?.message ?? data?.error ?? 'unknown_error'}`);
+      }
+      await startPdfPolling(documentId);
     });
   });
 
