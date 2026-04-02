@@ -3310,8 +3310,14 @@ const renderView = async (viewName) => {
     try {
       await loadKpiDashboard();
     } catch (error) {
-      const kpiState = ensureKpiState();
-      kpiState.loadingError = error.message;
+      state.kpi ??= {
+        widgets: {},
+        timeseries: [],
+        variantPerformance: [],
+        range: { from: null, to: null },
+        loadingError: null,
+      };
+      state.kpi.loadingError = error.message;
     }
     renderLayout(DashboardView());
     bindEvents(viewName, session);
