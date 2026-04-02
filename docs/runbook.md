@@ -115,3 +115,40 @@ Hinweise:
 - Idempotent: Der Backfill nutzt `on conflict (user_id) do nothing`.
 - Sichere Standardrolle: Standard ist `viewer` (alternativ z. B. `editor`).
 - Audit: Jeder Lauf schreibt einen Eintrag in `public.audit_logs` (`action = 'user_roles_backfill'`) mit `default_role` und `inserted_count`.
+
+## 5. Funktions-Drift-Check + Live-UI-Smoketest
+
+### 5.1 Gezielte Routine-Abfrage
+```sql
+select routine_name
+from information_schema.routines
+where routine_schema = 'public'
+  and routine_name in (
+    'recover_stuck_jobs',
+    'retry_dead_letter_job',
+    'schedule_calendar_event',
+    'set_maintenance_mode'
+  )
+order by routine_name;
+```
+
+**Soll-Ergebnis:** 4 Zeilen (alle Routinen vorhanden).
+
+Wenn eine Routine fehlt:
+1. Zugehörige Migration erneut anwenden (bevorzugt).
+2. Falls nicht möglich: fehlende Function separat via `create or replace function` deployen.
+3. Abfrage erneut ausführen und Ergebnis im Ticket dokumentieren.
+
+### 5.2 Live-Tests im Frontend (betroffene Buttons)
+Nach erfolgreichem Drift-Check je Funktion einen Klick-/Ergebnis-Test im laufenden Frontend durchführen:
+
+1. **Ops**
+   - `recover-stuck-jobs`
+   - Dead-letter `Retry`
+   - Dead-letter `Discard`
+2. **Campaign Workspace**
+   - Kalender-`Reschedule`
+3. **Admin**
+   - `Maintenance Mode speichern`
+
+**Erwartung:** Kein RPC-Fehler im UI-Status, Daten aktualisieren sich sichtbar (Liste/Status/Settings), und relevante Audit-/Operations-Logs erhalten neue Einträge.
