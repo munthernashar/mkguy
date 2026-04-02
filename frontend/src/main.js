@@ -109,6 +109,12 @@ const TRANSITIONS = {
 
 const PDF_POLL_INTERVAL_MS = 4000;
 const PDF_ACTION_DISABLE_MS = 1200;
+const RPC_UNAVAILABLE_PATTERNS = [/undefined function/i, /not found/i, /could not find the function/i, /404/];
+const CRITICAL_RPC_HEALTHCHECKS = [
+  { fn: 'job_monitoring_dashboard', args: { p_window_hours: 24 }, label: 'Monitoring Dashboard RPC' },
+  { fn: 'dashboard_widgets', args: { p_window_hours: 24 }, label: 'Dashboard Widgets RPC' },
+  { fn: 'export_posts_csv', args: { p_from: null, p_to: null, p_book_id: null, p_campaign_id: null, p_platform: null }, label: 'Posts CSV Export RPC' },
+];
 
 const state = {
   currentRole: null,
@@ -143,6 +149,10 @@ const state = {
       publish: [],
       generation: [],
     },
+  },
+  opsHealth: {
+    checked: false,
+    checks: [],
   },
   adminWorkspace: {
     settings: null,
@@ -286,6 +296,33 @@ const state = {
       hashtags: ['#brand', '#toneofvoice'],
     },
   ],
+};
+
+const isRpcUnavailableError = (error) => {
+  if (!error) return false;
+  const message = `${error.message ?? ''} ${error.details ?? ''} ${error.hint ?? ''}`.toLowerCase();
+  return error.code === 'PGRST202'
+    || Number(error.status) === 404
+    || RPC_UNAVAILABLE_PATTERNS.some((pattern) => pattern.test(message));
+};
+
+const setRpcUnavailableStatus = (setStatus, rpcName, contextLabel = 'RPC') => {
+  setStatus(`${contextLabel}: RPC ${rpcName} nicht verfügbar`);
+};
+
+const runStartupRpcHealthCheck = async () => {
+  if (state.opsHealth.checked) return;
+  const checks = [];
+  for (const check of CRITICAL_RPC_HEALTHCHECKS) {
+    const { error } = await supabase.rpc(check.fn, check.args);
+    checks.push({
+      ...check,
+      ok: !isRpcUnavailableError(error),
+      errorMessage: error?.message ?? null,
+    });
+  }
+  state.opsHealth.checks = checks;
+  state.opsHealth.checked = true;
 };
 
 const ensureKpiState = () => {
@@ -1252,6 +1289,7 @@ const StudioView = () => {
 
 const OpsView = () => {
   const monitor = state.monitor.summary ?? {};
+  const rpcHealthChecks = state.opsHealth.checks ?? [];
   const alerts = classifyAlertBanners(monitor);
   const adminSettings = state.adminWorkspace.settings ?? {};
   const limits = parseObject(adminSettings.global_limits, {});
@@ -1326,6 +1364,10 @@ const OpsView = () => {
       ${alerts.map((alert) => `<div class="banner"><h4>${alert.label}</h4><p>${alert.action}</p></div>`).join('') || '<p class="muted">Keine priorisierten Alarmindikatoren im aktuellen Fenster.</p>'}
       <p class="muted">Publish Success-Rate (24h): <code>${Number(monitor.success_rate ?? 0) * 100}%</code> • Ø Publish-Latenz: <code>${monitor.publish_latency_seconds ?? 0}s</code></p>
       <p class="muted">Status Publish: <code>${JSON.stringify(monitor.publish_status_distribution ?? {})}</code> • Generation: <code>${JSON.stringify(monitor.generation_status_distribution ?? {})}</code></p>
+      <h4>Startup RPC Health-Check</h4>
+      ${rpcHealthChecks.length
+    ? `<ul>${rpcHealthChecks.map((check) => `<li>${check.ok ? '✅' : '❌'} ${escapeHtml(check.label)} (<code>${check.fn}</code>)${check.ok ? '' : ` — ${escapeHtml(check.errorMessage ?? 'nicht verfügbar')}`}</li>`).join('')}</ul>`
+    : '<p class="muted">Noch kein Startup-Check ausgeführt.</p>'}
     </section>
     <div class="ops-layout">
       ${buildSection('publish')}
@@ -2334,6 +2376,10 @@ const bindStudioEvents = () => {
         p_platform: platform,
         p_starts_at: new Date(startsAt).toISOString(),
       });
+      if (isRpcUnavailableError(error)) {
+        setRpcUnavailableStatus(setStatus, 'schedule_calendar_event', 'Terminverschiebung fehlgeschlagen');
+        return;
+      }
       if (error) return setStatus(`Terminverschiebung fehlgeschlagen: ${error.message}`);
       if (Array.isArray(data?.conflict_flags) && data.conflict_flags.length) {
         setStatus(`Termin verschoben mit Konflikten: ${data.conflict_flags.join(', ')}`);
@@ -3119,6 +3165,7 @@ const bindOpsEvents = () => {
   document.getElementById('refresh-monitor')?.addEventListener('click', async () => refreshOps('Monitoring-Dashboard aktualisiert.'));
   document.getElementById('recover-stuck-jobs')?.addEventListener('click', async () => {
     const { error } = await supabase.rpc('recover_stuck_jobs', { p_requeue_delay_seconds: 30 });
+    if (isRpcUnavailableError(error)) return setRpcUnavailableStatus(setStatus, 'recover_stuck_jobs', 'Ops-Aktion fehlgeschlagen');
     if (error) return setStatus(`recover-stuck-jobs fehlgeschlagen: ${error.message}`);
     await refreshOps('recover-stuck-jobs ausgeführt.');
   });
@@ -3147,6 +3194,7 @@ const bindOpsEvents = () => {
       const jobType = button.dataset.detailType;
       const jobId = button.dataset.detailId;
       const { data, error } = await supabase.rpc('job_detail_redacted', { p_job_type: jobType, p_job_id: jobId });
+      if (isRpcUnavailableError(error)) return setRpcUnavailableStatus(setStatus, 'job_detail_redacted', 'Detailabruf fehlgeschlagen');
       if (error) return setStatus(`Detailabruf fehlgeschlagen: ${error.message}`);
       state.monitor.selectedDetailByType[jobType] = data;
       renderLayout(OpsView());
@@ -3158,6 +3206,7 @@ const bindOpsEvents = () => {
       const jobType = button.dataset.retryType;
       const jobId = button.dataset.retryId;
       const { data, error } = await supabase.rpc('retry_dead_letter_job', { p_job_type: jobType, p_job_id: jobId });
+      if (isRpcUnavailableError(error)) return setRpcUnavailableStatus(setStatus, 'retry_dead_letter_job', 'Retry fehlgeschlagen');
       if (error || !data) return setStatus(`Retry fehlgeschlagen: ${error?.message ?? 'not_allowed_or_not_dead_letter'}`);
       await refreshOps(`Dead-Letter Job ${jobId} wurde erneut in die Queue gestellt.`);
     });
@@ -3167,6 +3216,7 @@ const bindOpsEvents = () => {
       const jobType = button.dataset.discardType;
       const jobId = button.dataset.discardId;
       const { data, error } = await supabase.rpc('discard_dead_letter_job', { p_job_type: jobType, p_job_id: jobId });
+      if (isRpcUnavailableError(error)) return setRpcUnavailableStatus(setStatus, 'discard_dead_letter_job', 'Verwerfen fehlgeschlagen');
       if (error || !data) return setStatus(`Verwerfen fehlgeschlagen: ${error?.message ?? 'not_allowed_or_not_dead_letter'}`);
       await refreshOps(`Dead-Letter Job ${jobId} wurde verworfen.`);
     });
@@ -3180,7 +3230,11 @@ const bindOpsEvents = () => {
       let ok = 0;
       for (const jobId of selected) {
         const fn = mode === 'retry' ? 'retry_dead_letter_job' : 'discard_dead_letter_job';
-        const { data } = await supabase.rpc(fn, { p_job_type: jobType, p_job_id: jobId });
+        const { data, error } = await supabase.rpc(fn, { p_job_type: jobType, p_job_id: jobId });
+        if (isRpcUnavailableError(error)) {
+          setRpcUnavailableStatus(setStatus, fn, 'Batch-Aktion fehlgeschlagen');
+          return;
+        }
         if (data) ok += 1;
       }
       state.monitor.selectedJobs[jobType] = [];
@@ -3203,6 +3257,7 @@ const bindOpsEvents = () => {
         p_platform: filters.platform || null,
       };
       const { data, error } = await supabase.rpc(exportFn, payload);
+      if (isRpcUnavailableError(error)) return setRpcUnavailableStatus(setStatus, exportFn, 'CSV-Export fehlgeschlagen');
       if (error) return setStatus(`${exportFn} fehlgeschlagen: ${error.message}`);
       triggerCsvDownload(data ?? '', `${exportFn}_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`);
       setStatus(`${exportFn} erfolgreich exportiert.`);
@@ -3256,6 +3311,7 @@ const bindOpsEvents = () => {
       p_enabled: enabled,
       p_message: message,
     });
+    if (isRpcUnavailableError(error)) return setRpcUnavailableStatus(setStatus, 'set_maintenance_mode', 'Maintenance-Mode fehlgeschlagen');
     if (error) return setStatus(`set_maintenance_mode fehlgeschlagen: ${error.message}`);
     await refreshOps(`Maintenance Mode ${enabled ? 'aktiviert' : 'deaktiviert'}.`);
   });
@@ -3409,6 +3465,7 @@ const renderView = async (viewName) => {
 };
 
 const boot = async () => {
+  await runStartupRpcHealthCheck();
   const view = getCurrentView();
   if (hasAuthCode() && view !== 'auth-callback') {
     const next = getParam('next') || buildViewUrl('studio');
