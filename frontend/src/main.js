@@ -63,6 +63,30 @@ const IMAGE_ASPECT_RATIOS = {
   x: '16:9',
   threads: '1:1',
 };
+
+const DOCUMENT_MIME_TYPES = {
+  pdf: ['application/pdf'],
+  doc: ['application/msword'],
+  docx: ['application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+};
+
+const detectDocumentType = (file) => {
+  const lowerName = (file?.name ?? '').toLowerCase();
+  const mimeType = (file?.type ?? '').toLowerCase();
+  const byMime = Object.entries(DOCUMENT_MIME_TYPES).find(([, mimeList]) => mimeList.includes(mimeType))?.[0] ?? null;
+  if (byMime) return byMime;
+  if (lowerName.endsWith('.pdf')) return 'pdf';
+  if (lowerName.endsWith('.docx')) return 'docx';
+  if (lowerName.endsWith('.doc')) return 'doc';
+  return null;
+};
+
+const sourceTypeForDocumentType = (documentType) => {
+  if (documentType === 'pdf') return 'upload_pdf';
+  if (documentType === 'docx') return 'upload_docx';
+  if (documentType === 'doc') return 'upload_doc';
+  return 'upload';
+};
 const PREVIEW_LIMITS = {
   linkedin: 3000,
   instagram: 2200,
@@ -748,8 +772,8 @@ const StudioView = () => {
       </div>
       ${!selectedBook ? '<p class="muted">Lege zuerst ein Buch an, um PDFs hochzuladen.</p>' : `
         <form id="pdf-upload-form" class="inline-actions">
-          <input id="pdf-file" type="file" accept="application/pdf" required />
-          <button type="submit">PDF in Storage-Bucket hochladen</button>
+          <input id="pdf-file" type="file" accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" required />
+          <button type="submit">Dokument in Storage-Bucket hochladen</button>
         </form>
       `}
       <h4>Dokumentstatus</h4>
@@ -758,7 +782,9 @@ const StudioView = () => {
     return `
           <div class="list-item">
             <div><strong>${escapeHtml(document.file_name ?? 'Unbekanntes Dokument')}</strong> ${statusPill(document.parse_status ?? 'uploaded')}</div>
-            <div class="muted">Status: <code>${document.parse_status ?? 'uploaded'}</code> • Hochgeladen: ${new Date(document.created_at).toLocaleString()}</div>
+            <div class="muted">
+              Status: <code>${document.parse_status ?? 'uploaded'}</code> • Typ: <code>${document.source_type ?? 'upload'}</code> • MIME: <code>${document.mime_type ?? 'unbekannt'}</code> • Hochgeladen: ${new Date(document.created_at).toLocaleString()}
+            </div>
             ${document.parse_error ? `<div class="danger">Parse-Fehler: ${escapeHtml(document.parse_error)}</div>` : ''}
             <div class="inline-actions">
               <button data-start-analysis="${document.id}">Analyse starten</button>
@@ -1428,7 +1454,7 @@ const loadPdfWorkspace = async (session) => {
 
   const { data: documents, error: docsError } = await supabase
     .from('book_documents')
-    .select('id, book_id, file_name, source_uri, parse_status, parse_error, created_at, updated_at, parsed_at, document_metadata')
+    .select('id, book_id, file_name, source_uri, source_type, mime_type, parse_status, parse_error, created_at, updated_at, parsed_at, document_metadata')
     .is('deleted_at', null)
     .order('updated_at', { ascending: false })
     .limit(200);
@@ -1911,28 +1937,33 @@ const bindStudioEvents = () => {
     const fileInput = document.getElementById('pdf-file');
     const file = fileInput?.files?.[0];
     if (!selectedBookId) return setStatus('Bitte zuerst ein Buch auswählen.');
-    if (!file) return setStatus('Bitte eine PDF-Datei auswählen.');
+    if (!file) return setStatus('Bitte eine Datei auswählen.');
     try {
       const session = await getSession();
       if (!session?.user?.id) return setStatus('Nicht eingeloggt: Upload nicht möglich.');
+      const documentType = detectDocumentType(file);
+      if (!documentType) {
+        return setStatus('Nicht unterstützter Dokumenttyp. Bitte PDF, DOCX oder DOC auswählen.');
+      }
+      const mimeType = file.type || DOCUMENT_MIME_TYPES[documentType]?.[0] || 'application/octet-stream';
       const sanitizedFileName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, '_');
       const objectPath = `${selectedBookId}/${Date.now()}-${sanitizedFileName}`;
-      const { error: uploadError } = await supabase.storage.from('book-pdfs').upload(objectPath, file, { contentType: file.type || 'application/pdf' });
+      const { error: uploadError } = await supabase.storage.from('book-pdfs').upload(objectPath, file, { contentType: mimeType });
       if (uploadError) throw new Error(`Storage-Upload fehlgeschlagen (${uploadError.message}).`);
       const { error: docError } = await supabase.from('book_documents').insert({
         book_id: selectedBookId,
-        source_type: 'upload',
+        source_type: sourceTypeForDocumentType(documentType),
         source_uri: `book-pdfs/${objectPath}`,
         file_name: file.name,
-        mime_type: file.type || 'application/pdf',
+        mime_type: mimeType,
         parse_status: 'uploaded',
         created_by: session.user.id,
         updated_by: session.user.id,
       });
       if (docError) throw docError;
-      await refreshStudio(`PDF "${file.name}" wurde hochgeladen.`);
+      await refreshStudio(`Dokument "${file.name}" wurde hochgeladen.`);
     } catch (error) {
-      setStatus(`PDF-Upload fehlgeschlagen: ${error.message}`);
+      setStatus(`Upload fehlgeschlagen: ${error.message}`);
     }
   });
 
